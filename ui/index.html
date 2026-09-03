@@ -1,21 +1,231 @@
 <!doctype html>
-<meta charset="utf-8" />
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>panto</title>
-<!--
-  Single-page UI. Websocket client of panto.web (default ws://<host>:8080).
-  Keep it dependency-light like odrive_knob/ui/index.html.
-
-  Panels (see spec "Components"):
-    status bar   idle / error / FOC state, latency, fps, control-loop Hz, currents
-    settings     link lengths, torques, max driven torque, snap distance/strength
-    calibration  zero positions, j+/j- limits, work area (default = reach arc,
-                 or draw it with the linkage)
-    running      record / playback trajectory (cartesian), draw shape
-                 (circle / bezier / line / square / poly), toggle snap-to,
-                 snap-to-grid hotkey
-
-  Must send a periodic heartbeat; the runtime idles the motors after 5 s silence.
--->
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#161a22; --line:#262c38; --text:#e6e9ef; --muted:#8b93a3;
+    --dot:#5064c8; --arm:#5a1297; --anchor:#3aa0d4; --warn:#d4763a; --ok:#4ba36a; --bad:#b4453f;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:grid; grid-template-columns:minmax(0,1fr) 320px; min-height:100vh;
+  }
+  @media (max-width:820px) { body { grid-template-columns:1fr; } }
+  main { display:grid; place-items:center; padding:24px; gap:12px; align-content:center; }
+  canvas { touch-action:none; background:#0a0c10; border:1px solid var(--line); border-radius:8px; cursor:crosshair; }
+  aside { background:var(--panel); border-left:1px solid var(--line); padding:20px; overflow-y:auto; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; font-weight:600; }
+  section + section { margin-top:22px; }
+  button {
+    display:inline-block; padding:7px 12px; margin:0 4px 4px 0; background:transparent; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; cursor:pointer; font:inherit; font-size:13px;
+  }
+  button:hover { border-color:#3a4152; background:#1c212b; }
+  button[aria-pressed="true"] { border-color:var(--dot); background:#1a1f33; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0; font-variant-numeric:tabular-nums; }
+  dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); }
+  .hint { color:var(--muted); font-size:12px; margin:0 0 10px; }
+  #status { font-size:12px; color:var(--muted); }
+  #status::before { content:"● "; }
+  #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); }
+</style>
+</head>
 <body>
-  <p>panto UI — not implemented yet. See HANDOFF.md milestone 2.</p>
+<main>
+  <canvas id="view" width="440" height="440"></canvas>
+  <div id="status" class="dead">connecting…</div>
+  <div class="hint">click to set a hold point · drag from the tip to apply a "hand" force (sim)</div>
+</main>
+
+<aside>
+  <section>
+    <h2>Mode</h2>
+    <div id="modes"></div>
+  </section>
+
+  <section>
+    <h2>Constraint</h2>
+    <button id="clear-c">clear</button>
+    <span id="c-desc" class="hint">none</span>
+  </section>
+
+  <section>
+    <h2>State</h2>
+    <dl>
+      <dt>closed loop</dt><dd id="s-cl">–</dd>
+      <dt>pose x,y</dt><dd id="s-pose">–</dd>
+      <dt>q1,q2</dt><dd id="s-q">–</dd>
+      <dt>anchor</dt><dd id="s-anchor">–</dd>
+      <dt>force limit</dt><dd id="s-flim">–</dd>
+      <dt>σ_min(J)</dt><dd id="s-sig">–</dd>
+      <dt>currents</dt><dd id="s-cur">–</dd>
+      <dt>I²t</dt><dd id="s-i2t">–</dd>
+      <dt>errors</dt><dd id="s-err">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Loop health</h2>
+    <dl>
+      <dt>rate</dt><dd id="h-rate">–</dd>
+      <dt>jitter p95</dt><dd id="h-jit">–</dd>
+      <dt>feedback age</dt><dd id="h-age">–</dd>
+      <dt>overruns</dt><dd id="h-over">–</dd>
+      <dt>tx / rx</dt><dd id="h-txrx">–</dd>
+    </dl>
+  </section>
+</aside>
+
+<script>
+const TAU = Math.PI * 2;
+const L1 = 0.125, L2 = 0.125, REACH = L1 + L2;
+const cv = document.getElementById('view'), ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+const PX = cv.width / (2.4 * REACH);            // metres -> pixels
+const OX = cv.width / 2, OY = cv.height / 2;    // base joint at canvas centre
+
+let ws = null, state = null, controller = false, sim = false, modes = [];
+let constraint = null;                          // {kind:'point', at:[x,y]}
+let dragging = false;
+
+const m2p = (x, y) => [OX + x * PX, OY - y * PX];
+const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
+
+/* ------------------------------------------------------------------ transport */
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'connected'; statusEl.className = 'live'; };
+  ws.onclose = () => { statusEl.textContent = 'disconnected — retrying'; statusEl.className = 'dead'; setTimeout(connect, 1000); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'hello') { controller = m.controller; sim = m.sim; modes = m.modes; renderModes(); }
+    else if (m.type === 'role') { controller = m.controller; renderModes(); }
+    else if (m.type === 'state') { state = m; draw(); panel(m); }
+  };
+}
+const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+setInterval(() => send({ type: 'heartbeat' }), 1000);
+
+/* ------------------------------------------------------------------ controls */
+function renderModes() {
+  const host = document.getElementById('modes');
+  host.innerHTML = '';
+  modes.forEach(mode => {
+    const b = document.createElement('button');
+    b.textContent = mode;
+    b.setAttribute('aria-pressed', state && state.mode === mode);
+    b.disabled = !controller;
+    b.onclick = () => send({ type: 'set_mode', mode });
+    host.appendChild(b);
+  });
+}
+document.getElementById('clear-c').onclick = () => {
+  constraint = null;
+  document.getElementById('c-desc').textContent = 'none';
+  send({ type: 'set_constraints', constraints: [] });
+};
+
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect();
+  const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
+  if (sim && state && Math.hypot(mx - state.pose[0], my - state.pose[1]) < 0.03) {
+    dragging = true; cv.setPointerCapture(e.pointerId); return;
+  }
+  if (!controller) return;
+  if (Math.hypot(mx, my) > REACH * 0.98) return;
+  constraint = { kind: 'point', at: [mx, my] };
+  document.getElementById('c-desc').textContent = `point (${mx.toFixed(3)}, ${my.toFixed(3)})`;
+  send({ type: 'set_constraints', constraints: [constraint] });
+});
+cv.addEventListener('pointermove', e => {
+  if (!dragging || !state) return;
+  const r = cv.getBoundingClientRect();
+  const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
+  // crude: pull toward the cursor as a joint-space torque couple
+  const dx = mx - state.pose[0], dy = my - state.pose[1];
+  send({ type: 'perturb', tau: [8 * dx, 8 * dy] });
+});
+const endDrag = () => { if (dragging) { dragging = false; send({ type: 'perturb', tau: [0, 0] }); } };
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+/* ------------------------------------------------------------------ drawing */
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  // reach disk
+  ctx.strokeStyle = '#1b2130'; ctx.beginPath();
+  ctx.arc(OX, OY, REACH * PX, 0, TAU); ctx.stroke();
+
+  if (!state) return;
+  const [q1, q2] = state.q;
+  const j0 = [0, 0];
+  const j1 = [L1 * Math.cos(q1), L1 * Math.sin(q1)];
+  const ee = [j1[0] + L2 * Math.cos(q1 + q2), j1[1] + L2 * Math.sin(q1 + q2)];
+
+  // links
+  ctx.strokeStyle = 'var(--arm)'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.strokeStyle = '#5a1297'; ctx.beginPath();
+  ctx.moveTo(...m2p(...j0)); ctx.lineTo(...m2p(...j1)); ctx.lineTo(...m2p(...ee)); ctx.stroke();
+
+  // joints
+  ctx.fillStyle = '#8b93a3';
+  for (const j of [j0, j1]) { ctx.beginPath(); ctx.arc(...m2p(...j), 5, 0, TAU); ctx.fill(); }
+  // end-effector
+  ctx.fillStyle = '#e6e9ef'; ctx.beginPath(); ctx.arc(...m2p(...ee), 6, 0, TAU); ctx.fill();
+
+  // anchor
+  if (state.anchor) {
+    ctx.strokeStyle = '#3aa0d4'; ctx.lineWidth = 1.5;
+    const [ax, ay] = m2p(...state.anchor);
+    ctx.beginPath(); ctx.arc(ax, ay, 7, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(...m2p(...ee)); ctx.lineTo(ax, ay); ctx.stroke();
+  }
+  // constraint marker
+  if (constraint) {
+    ctx.fillStyle = '#3aa0d4'; const [cx, cy] = m2p(...constraint.at);
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, TAU); ctx.fill();
+  }
+}
+
+/* ------------------------------------------------------------------ panel */
+const f2 = a => a.map(v => v.toFixed(2)).join(', ');
+const f3 = a => a.map(v => v.toFixed(3)).join(', ');
+function panel(s) {
+  document.getElementById('s-cl').textContent = s.closed_loop ? 'yes' : 'no';
+  document.getElementById('s-pose').textContent = f3(s.pose);
+  document.getElementById('s-q').textContent = f3(s.q);
+  document.getElementById('s-anchor').textContent = s.anchor ? f3(s.anchor) : '–';
+  document.getElementById('s-flim').textContent = s.force_limit.toFixed(2) + ' N';
+  document.getElementById('s-sig').textContent = s.sigma_min.toFixed(4);
+  document.getElementById('s-cur').textContent = f2(s.currents) + ' A';
+  const i2t = document.getElementById('s-i2t');
+  i2t.textContent = s.i2t_frac.map(v => (v * 100).toFixed(0) + '%').join(' / ');
+  i2t.className = Math.max(...s.i2t_frac) > 0.5 ? 'warn' : '';
+  const err = document.getElementById('s-err');
+  err.textContent = s.errors.length ? s.errors.join(' ') : 'none';
+  err.className = s.errors.length ? 'warn' : '';
+
+  const st = s.stats;
+  document.getElementById('h-rate').textContent = st.rate_hz.toFixed(0) + ' Hz';
+  const jit = document.getElementById('h-jit');
+  jit.textContent = st.jitter_p95_ms.toFixed(2) + ' ms';
+  jit.className = st.jitter_p95_ms > 2 ? 'warn' : '';
+  document.getElementById('h-age').textContent = st.feedback_age_ms.toFixed(1) + ' ms';
+  const ov = document.getElementById('h-over');
+  ov.textContent = st.overruns; ov.className = st.overruns > 0 ? 'warn' : '';
+  document.getElementById('h-txrx').textContent = `${st.tx} / ${st.rx}`;
+
+  document.querySelectorAll('#modes button').forEach(b =>
+    b.setAttribute('aria-pressed', b.textContent === s.mode));
+}
+
+connect();
+</script>
 </body>
+</html>

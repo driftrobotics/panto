@@ -68,19 +68,21 @@ class SimParams:
 class _AxisPlant:
     """Pure plant + ODrive controller for one node. No threads, no bus."""
 
-    def __init__(self, params: SimParams) -> None:
+    def __init__(self, params: SimParams, home_rad: float = 0.0) -> None:
         self._p = params
         self._lock = threading.Lock()
 
-        # true plant state
-        self.angle = 0.0        # rad
+        # true plant state. `home_rad` is the motor-shaft angle the axis powers
+        # up at; defaulting both joints to 0 puts the arm straight out at its
+        # extension singularity, so CanLink seeds a non-singular pose in --sim.
+        self.angle = home_rad   # rad
         self.velocity = 0.0     # rad/s
         self._external_torque = 0.0  # N·m — "the user's hand"
 
         # controller state
         self.axis_state = AXIS_STATE_IDLE
         self._control_mode = CONTROL_MODE_POSITION
-        self._input_pos = 0.0        # turns
+        self._input_pos = home_rad / TWO_PI  # turns
         self._input_torque = 0.0     # N·m
         self._pos_gain = 20.0        # (turn/s)/turn
         self._vel_gain = 0.02        # N·m/(turn/s)
@@ -91,7 +93,7 @@ class _AxisPlant:
         self._last_current = 0.0     # A, for Get_Iq
 
         # encoder estimator (PLL) state, rad
-        self._est_pos = 0.0
+        self._est_pos = home_rad
         self._est_vel = 0.0
 
     # -- commands (called from the sim rx thread) --------------------------
@@ -218,11 +220,16 @@ class PantoSim:
     node_ids: tuple[int, int] = (0, 1)
     params: SimParams = field(default_factory=SimParams)
     dbc_path: Path = DEFAULT_DBC
+    #: motor-shaft power-up angle per node (rad); CanLink sets this in --sim
+    home_rad: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         self._db = cantools.database.load_file(str(self.dbc_path))
         self._msg_cache: dict[tuple[int, str], object] = {}
-        self._plants = {nid: _AxisPlant(self.params) for nid in self.node_ids}
+        self._plants = {
+            nid: _AxisPlant(self.params, self.home_rad[i])
+            for i, nid in enumerate(self.node_ids)
+        }
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 

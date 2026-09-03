@@ -39,6 +39,11 @@ TWO_PI = 2.0 * np.pi
 
 DEFAULT_DBC = Path(__file__).resolve().parent.parent / "dbc" / "odrive-cansimple-0.5.6.dbc"
 
+#: Joint angles (rad, elbow-up) the --sim rig powers up at. Well inside the
+#: workspace and away from the extension singularity so the arm has force
+#: authority to move from the start; hardware homes wherever it physically sits.
+SIM_HOME_JOINT_RAD = (0.4, 1.4)
+
 # CANSimple command ids (Firmware/communication/can/can_simple.hpp).
 CMD = {
     "Heartbeat": 0x001,
@@ -231,7 +236,11 @@ class CanLink:
             self._bus = can.Bus(interface="virtual", channel=channel)
             self._sim_bus = can.Bus(interface="virtual", channel=channel)
             self._owns_bus = True
-            self._sim = PantoSim(self._sim_bus, node_ids=self._node_ids)
+            home = tuple(
+                turns_from_joint(SIM_HOME_JOINT_RAD[i], self._flip[i], self._zero[i]) * TWO_PI
+                for i in range(2)
+            )
+            self._sim = PantoSim(self._sim_bus, node_ids=self._node_ids, home_rad=home)
             self._sim.start()
         else:
             can_if, can_ch, can_br = self._can_settings()
