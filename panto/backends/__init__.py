@@ -5,5 +5,12 @@ feel on non-axis-aligned walls without rewriting anything above this layer.
 """
 
 from .base import ImpedanceBackend, ImpedanceCommand
+from .position import PositionBackend
+from .torque import TorqueBackend
 
-__all__ = ["ImpedanceBackend", "ImpedanceCommand"]
+__all__ = [
+    "ImpedanceBackend",
+    "ImpedanceCommand",
+    "PositionBackend",
+    "TorqueBackend",
+]

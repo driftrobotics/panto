@@ -2,7 +2,7 @@
 numpy
 python-can
 cantools
-websockets
+aiohttp
 
 # Dev
 pytest
