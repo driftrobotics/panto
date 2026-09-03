@@ -15,16 +15,32 @@ host-side damping here.
 
 from __future__ import annotations
 
-from .base import ImpedanceBackend, ImpedanceCommand
+import numpy as np
+
+from ..kinematics import jacobian
+from .base import DEFAULT_VEL_LIMIT_TURN_S, ImpedanceBackend, ImpedanceCommand
 
 
 class TorqueBackend(ImpedanceBackend):
-    def __init__(self, link, geo):
-        self._link = link
-        self._geo = geo
+    def enter(self) -> None:
+        for motor in self._config.motors:
+            self._link.set_controller_mode(motor.node_id, "torque")
+            self._link.set_limits(
+                motor.node_id, DEFAULT_VEL_LIMIT_TURN_S, motor.current_soft_max
+            )
 
     def apply(self, cmd: ImpedanceCommand) -> None:
-        raise NotImplementedError
+        F = np.asarray(cmd.stiffness, float) @ (
+            np.asarray(cmd.anchor, float) - np.asarray(cmd.pose, float)
+        )
+        mag = float(np.linalg.norm(F))
+        if mag > cmd.force_limit > 0.0:
+            F = F * (cmd.force_limit / mag)
+
+        tau = jacobian(cmd.q, self._config.geo).T @ F
+        for i, motor in enumerate(self._config.motors):
+            self._link.set_input_torque(motor.node_id, float(tau[i]))
 
     def relax(self) -> None:
-        raise NotImplementedError
+        for motor in self._config.motors:
+            self._link.set_input_torque(motor.node_id, 0.0)
