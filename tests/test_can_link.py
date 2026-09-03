@@ -34,7 +34,7 @@ def _motor(node_id, flip=False, zero=0.0):
     return SimpleNamespace(
         node_id=node_id, flip=flip, zero_offset_rad=zero,
         torque_constant=0.035, current_soft_max=0.8,
-        vel_gain=0.02, vel_integrator_gain=0.0, max_pos_gain=500.0,
+        vel_gain=0.0025, vel_integrator_gain=0.0, max_pos_gain=500.0,
     )
 
 
@@ -85,7 +85,7 @@ def link():
         lk.stop()
 
 
-def _arm(lk, gain=25.0):
+def _arm(lk, gain=200.0):
     for nid in (0, 1):
         lk.set_controller_mode(nid, "position")
         lk.set_limits(nid, 40.0, 0.8)

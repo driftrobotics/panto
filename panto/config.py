@@ -46,7 +46,8 @@ class MotorConfig:
     zero_offset_rad: float = 0.0        # joint angle at raw encoder zero
     torque_constant: float = 0.035      # N·m/A of Iq (EM3215)
     current_soft_max: float = 0.8       # A — datasheet *transient* rating
-    vel_gain: float = 0.02             # local 8 kHz damper, stays on the ODrive
+    vel_gain: float = 0.0025           # local 8 kHz damper, stays on the ODrive;
+    #                                   # ~2.5e-3 is the sane not-buzzy start on EM3215
     vel_integrator_gain: float = 0.0   # usually 0 for haptics
     max_pos_gain: float = 500.0        # clamp on derived pos_gain, (turn/s)/turn
     vel_limit: float = 20.0            # ODrive turn/s runaway guard (backend uses)

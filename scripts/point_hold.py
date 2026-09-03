@@ -17,9 +17,12 @@ Any exception / Ctrl-C -> relax + IDLE + close. Push the arm by hand during the
 hold to feel the spring; it should pull back toward the anchor.
 
 NOTE: pos_gain is derived as k_rad*2pi / motor.vel_gain, using the *config*
-vel_gain (default 0.02). If the drives' stored vel_gain differs, the rendered
-stiffness scales by that ratio — pass --vel-gain to match, or nail it in the
-milestone-3 vel_gain sweep. The 0.25 A cap bounds it either way.
+vel_gain (default 2.5e-3, the sane not-buzzy start on EM3215). If the drives'
+stored vel_gain differs, the rendered stiffness scales by that ratio — pass
+--vel-gain to match, or nail it in the milestone-3 vel_gain sweep. The 0.25 A
+cap bounds it either way. Also watch max_pos_gain (500): with vel_gain 2.5e-3 a
+modest k_rad already saturates it, so effective stiffness may clamp — raise it
+in a config.local.json if the hold is still soft at the current cap.
 
 TODO(telemetry): this script's ad-hoc print loop wants replacing with the
 proper telemetry/logging stack (structured samples -> ring buffer -> file +

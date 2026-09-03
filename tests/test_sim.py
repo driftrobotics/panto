@@ -77,7 +77,7 @@ def _recv_decode(host, node_id, base_name, window=0.25):
     raise AssertionError(f"no Axis{node_id}_{base_name} seen")
 
 
-def _arm(host, node_id, gain=25.0):
+def _arm(host, node_id, gain=200.0):
     _send(host, node_id, "Set_Controller_Mode",
           {"Control_Mode": CONTROL_MODE_POSITION, "Input_Mode": INPUT_MODE_PASSTHROUGH})
     _send(host, node_id, "Set_Limits", {"Velocity_Limit": 40.0, "Current_Limit": 0.8})
@@ -137,7 +137,7 @@ def test_position_loop_converges_and_holds(rig):
 
 def test_position_loop_resists_a_disturbance(rig):
     host, sim = rig
-    _arm(host, 0, gain=40.0)
+    _arm(host, 0, gain=320.0)
     end = time.monotonic() + 1.0
     while time.monotonic() < end:
         _send(host, 0, "Set_Input_Pos", {"Input_Pos": 0.0, "Vel_FF": 0.0, "Torque_FF": 0.0})

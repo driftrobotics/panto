@@ -85,7 +85,7 @@ class _AxisPlant:
         self._input_pos = home_rad / TWO_PI  # turns
         self._input_torque = 0.0     # N·m
         self._pos_gain = 20.0        # (turn/s)/turn
-        self._vel_gain = 0.02        # N·m/(turn/s)
+        self._vel_gain = 0.0025      # N·m/(turn/s) — matches config default
         self._vel_integrator_gain = 0.0
         self._vel_integrator = 0.0
         self._current_limit = 0.8    # A
