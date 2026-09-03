@@ -133,17 +133,25 @@ def main() -> None:
             cur = link.motor_currents()
             sig = min_singular_value(q, config.geo)
             status = link.node_status()
+            sent = backend.last_command or {}
             # every tick, not just printed ones -- a fault between prints is
-            # still on disk, not just visible on the LEDs for a few ms.
+            # still on disk, not just visible on the LEDs for a few ms. Also log
+            # what we *commanded* (pos_gain, current cap actually sent), not just
+            # what we measured -- "it didn't move" is undiagnosable from the
+            # measured side alone.
             log.sample(t=t, q=q, qd=qd, pose=pose, anchor=proj.anchor, err_m=err,
                       currents=cur, sigma_min=sig,
-                      feedback_age_ms=link.feedback_age_s() * 1e3, node_status=status)
+                      feedback_age_ms=link.feedback_age_s() * 1e3, node_status=status,
+                      sent=sent)
 
             if t >= next_print:
                 estr = "ok" if all(s.active_errors == 0 for s in status) else \
                     " ".join(f"ax{s.node_id}=0x{s.active_errors:x}" for s in status)
+                pg = sent.get("pos_gain", ["?", "?"])
+                cc = sent.get("current_cap_a", ["?", "?"])
                 print(f"  t={t:4.1f}s  pose=({pose[0]*1e3:6.1f},{pose[1]*1e3:6.1f})mm  "
                       f"err={err*1e3:5.2f}mm  i=({cur[0]:+.3f},{cur[1]:+.3f})A  "
+                      f"pos_gain=({pg[0]:.0f},{pg[1]:.0f})  cap=({cc[0]:.2f},{cc[1]:.2f})A  "
                       f"sig={sig:.3f}  age={link.feedback_age_s()*1e3:.1f}ms  err={estr}")
                 next_print = t + 0.5
             time.sleep(period)

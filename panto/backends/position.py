@@ -27,6 +27,10 @@ TWO_PI = 2.0 * np.pi
 
 
 class PositionBackend(ImpedanceBackend):
+    #: what the last `apply()` actually computed/sent, for logging/diagnosis.
+    #: `None` until the first `apply()`. See scripts/point_hold.py.
+    last_command: dict | None = None
+
     def enter(self) -> None:
         for motor in self._config.motors:
             self._link.set_controller_mode(motor.node_id, "position")
@@ -52,14 +56,26 @@ class PositionBackend(ImpedanceBackend):
         )
         tau_max = float(cmd.force_limit) / sigma
 
+        pos_gains = []
+        current_caps = []
         for i, motor in enumerate(self._config.motors):
+            pos_gain = self._pos_gain(motor, k_joint[i])
+            current_cap = self._current_cap(motor, tau_max)
             self._link.set_input_pos(motor.node_id, float(q_target[i]))
-            self._link.set_pos_gain(motor.node_id, self._pos_gain(motor, k_joint[i]))
-            self._link.set_limits(
-                motor.node_id,
-                DEFAULT_VEL_LIMIT_TURN_S,
-                self._current_cap(motor, tau_max),
-            )
+            self._link.set_pos_gain(motor.node_id, pos_gain)
+            self._link.set_limits(motor.node_id, DEFAULT_VEL_LIMIT_TURN_S, current_cap)
+            pos_gains.append(pos_gain)
+            current_caps.append(current_cap)
+
+        self.last_command = {
+            "q_target": q_target.tolist(),
+            "k_joint_nm_rad": k_joint.tolist(),
+            "pos_gain": pos_gains,
+            "current_cap_a": current_caps,
+            "sigma_min": sigma,
+            "tau_max_nm": tau_max,
+            "vel_limit_turn_s": DEFAULT_VEL_LIMIT_TURN_S,
+        }
 
     def relax(self) -> None:
         # Park each anchor on the current joint angle at zero gain → no torque.
