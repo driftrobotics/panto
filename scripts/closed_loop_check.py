@@ -29,18 +29,24 @@ import numpy as np
 from panto.can_link import CanLink
 from panto.config import Config
 from panto.kinematics import forward
+from panto.telemetry import RunLogger
 
 
-def _dump(link: CanLink, geo, tag: str) -> np.ndarray:
+def _dump(link: CanLink, geo, tag: str, log: RunLogger) -> np.ndarray:
     q, qd = link.joint_state()
     xy = forward(q, geo)
     cur = link.motor_currents()
-    errs = link.axis_errors()
+    status = link.node_status()
+    errstr = "ok" if all(s.active_errors == 0 and s.disarm_reason == 0 for s in status) else \
+        " ".join(f"axis{s.node_id}(active=0x{s.active_errors:x},disarm=0x{s.disarm_reason:x})"
+                 for s in status)
     print(f"  [{tag:9}] q=({np.degrees(q[0]):7.2f}, {np.degrees(q[1]):7.2f})deg  "
           f"xy=({xy[0]*1e3:6.1f}, {xy[1]*1e3:6.1f})mm  "
           f"i=({cur[0]:.3f}, {cur[1]:.3f})A  "
-          f"err={'ok' if not any(errs) else [hex(e) for e in errs]}  "
+          f"err={errstr}  "
           f"age={link.feedback_age_s()*1e3:.1f}ms")
+    log.sample(tag=tag, q=q, qd=qd, xy=xy, currents=cur,
+              feedback_age_ms=link.feedback_age_s() * 1e3, node_status=status)
     return q
 
 
@@ -62,6 +68,9 @@ def main() -> None:
         config.can.channel = args.channel
 
     nodes = [m.node_id for m in config.motors]
+    log = RunLogger("closed_loop_check", interface=config.can.interface,
+                    channel=config.can.channel, current=args.current,
+                    vel_limit=args.vel_limit, hold=args.hold)
     link = CanLink(config, sim=False)
     print(f"opening {config.can.interface}/{config.can.channel}")
     link.start()
@@ -71,14 +80,15 @@ def main() -> None:
             try:
                 link.set_idle(nid)
             except Exception as exc:  # noqa: BLE001
-                print(f"  ! failed to idle node {nid}: {exc}")
+                log.event(f"failed to idle node {nid}: {exc}", level="ERROR")
 
     try:
         link.wait_for_feedback(timeout=5.0)
-        q0 = _dump(link, config.geo, "start")
-        for i, nid in enumerate(nodes):
-            if link.axis_errors()[i]:
-                raise SystemExit(f"node {nid} has an axis error at rest; clear it first")
+        q0 = _dump(link, config.geo, "start", log)
+        for s in link.node_status():
+            if s.active_errors:
+                raise SystemExit(f"node {s.node_id} has an active error at rest "
+                                 f"(0x{s.active_errors:x}); clear it first")
 
         print(f"\nsetting limits: {args.current} A, {args.vel_limit} rad/s per axis")
         for nid in nodes:
@@ -91,25 +101,28 @@ def main() -> None:
         time.sleep(0.1)
 
         print("\n>>> entering CLOSED_LOOP_CONTROL on both axes <<<")
+        log.event(">>> entering CLOSED_LOOP_CONTROL <<<")
         link.enter_closed_loop(timeout=5.0)
         print("    both axes report CLOSED_LOOP_CONTROL\n")
 
         t_end = time.monotonic() + args.hold
         while time.monotonic() < t_end:
-            _dump(link, config.geo, "hold")
+            _dump(link, config.geo, "hold", log)
             time.sleep(0.5)
 
         drift = np.degrees(link.joint_state()[0] - q0)
         print(f"\n  joint drift over hold: ({drift[0]:+.2f}, {drift[1]:+.2f}) deg")
     except KeyboardInterrupt:
         print("\n! interrupted")
+        log.event("interrupted", level="WARN")
     finally:
         print("\nreturning both axes to IDLE")
         idle_all()
         time.sleep(0.2)
-        _dump(link, config.geo, "end")
+        _dump(link, config.geo, "end", log)
         link.close()
-        print("closed.")
+        log.close()
+        print(f"closed. log: {log.dir}")
 
 
 if __name__ == "__main__":

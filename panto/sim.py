@@ -343,6 +343,11 @@ class PantoSim:
                         "Procedure_Result": 0,
                         "Trajectory_Done_Flag": 1,
                     })
+                    # The sim plant never faults, but Get_Error must still be on
+                    # the bus so REQUIRED_MESSAGES validation and CanLink's
+                    # node_status() exercise the real code path in --sim too.
+                    self._emit(nid, "Get_Error",
+                              {"Active_Errors": 0, "Disarm_Reason": 0})
                 next_hb = now + p.heartbeat_period
             time.sleep(0.0005)
 

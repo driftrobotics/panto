@@ -12,6 +12,7 @@ venv/
 recordings/
 *.local.json
 calibration.json
+logs/
 
 # Editor / OS
 .DS_Store

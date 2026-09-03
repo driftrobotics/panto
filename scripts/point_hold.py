@@ -24,10 +24,11 @@ cap bounds it either way. Also watch max_pos_gain (500): with vel_gain 2.5e-3 a
 modest k_rad already saturates it, so effective stiffness may clamp — raise it
 in a config.local.json if the hold is still soft at the current cap.
 
-TODO(telemetry): this script's ad-hoc print loop wants replacing with the
-proper telemetry/logging stack (structured samples -> ring buffer -> file +
-live stream), shared with runtime.telemetry() and the milestone-3 experiment
-scripts. See the Notion progress page "Open follow-ups".
+Every control tick is logged (not just the printed ones) via `panto.telemetry
+.RunLogger`, including per-node `axis_state`/`active_errors`/`disarm_reason` —
+so a fault or oscillation that happens between printouts is still on disk. This
+is the first slice of the "architect a telemetry/logging stack" TODO; see the
+Notion progress page.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from panto.can_link import CanLink
 from panto.config import Config
 from panto.constraints import Point
 from panto.kinematics import forward, min_singular_value
+from panto.telemetry import RunLogger
 
 
 def main() -> None:
@@ -72,6 +74,9 @@ def main() -> None:
     nodes = [m.node_id for m in config.motors]
     K = args.stiffness * np.eye(2)
 
+    log = RunLogger("point_hold", interface=config.can.interface, channel=config.can.channel,
+                    current=args.current, stiffness=args.stiffness, vel_gain=args.vel_gain,
+                    hold=args.hold, step=args.step, rate=args.rate)
     link = CanLink(config, sim=False)
     backend = PositionBackend(link, config)
     print(f"opening {config.can.interface}/{config.can.channel}  "
@@ -83,7 +88,7 @@ def main() -> None:
             try:
                 link.set_idle(nid)
             except Exception as exc:  # noqa: BLE001
-                print(f"  ! idle node {nid}: {exc}")
+                log.event(f"idle node {nid}: {exc}", level="ERROR")
 
     try:
         link.wait_for_feedback(timeout=5.0)
@@ -97,6 +102,7 @@ def main() -> None:
         for i, nid in enumerate(nodes):
             link.set_input_pos(nid, float(q0[i]))
         print(">>> entering CLOSED_LOOP_CONTROL <<<")
+        log.event(">>> entering CLOSED_LOOP_CONTROL <<<")
         link.enter_closed_loop(timeout=5.0)
         print("    closed loop; holding\n")
 
@@ -112,7 +118,9 @@ def main() -> None:
                 tgt = pose0 + np.array([args.step * 1e-3, 0.0])
                 constraint = Point(at=tgt)
                 stepped = True
-                print(f"  -- anchor -> ({tgt[0]*1e3:.1f}, {tgt[1]*1e3:.1f})mm --")
+                msg = f"anchor -> ({tgt[0]*1e3:.1f}, {tgt[1]*1e3:.1f})mm"
+                print(f"  -- {msg} --")
+                log.event(msg)
 
             q, qd = link.joint_state()
             pose = forward(q, config.geo)
@@ -121,19 +129,30 @@ def main() -> None:
                                    stiffness=K, force_limit=5.0)
             backend.apply(cmd)
 
+            err = float(np.linalg.norm(proj.anchor - pose))
+            cur = link.motor_currents()
+            sig = min_singular_value(q, config.geo)
+            status = link.node_status()
+            # every tick, not just printed ones -- a fault between prints is
+            # still on disk, not just visible on the LEDs for a few ms.
+            log.sample(t=t, q=q, qd=qd, pose=pose, anchor=proj.anchor, err_m=err,
+                      currents=cur, sigma_min=sig,
+                      feedback_age_ms=link.feedback_age_s() * 1e3, node_status=status)
+
             if t >= next_print:
-                err = np.linalg.norm(proj.anchor - pose) * 1e3
-                cur = link.motor_currents()
-                sig = min_singular_value(q, config.geo)
+                estr = "ok" if all(s.active_errors == 0 for s in status) else \
+                    " ".join(f"ax{s.node_id}=0x{s.active_errors:x}" for s in status)
                 print(f"  t={t:4.1f}s  pose=({pose[0]*1e3:6.1f},{pose[1]*1e3:6.1f})mm  "
-                      f"err={err:5.2f}mm  i=({cur[0]:+.3f},{cur[1]:+.3f})A  "
-                      f"sig={sig:.3f}  age={link.feedback_age_s()*1e3:.1f}ms")
+                      f"err={err*1e3:5.2f}mm  i=({cur[0]:+.3f},{cur[1]:+.3f})A  "
+                      f"sig={sig:.3f}  age={link.feedback_age_s()*1e3:.1f}ms  err={estr}")
                 next_print = t + 0.5
             time.sleep(period)
     except KeyboardInterrupt:
         print("\n! interrupted")
+        log.event("interrupted", level="WARN")
     except Exception as exc:  # noqa: BLE001
         print(f"\n! {type(exc).__name__}: {exc}")
+        log.event(f"{type(exc).__name__}: {exc}", level="ERROR")
     finally:
         print("\nrelax + IDLE")
         try:
@@ -143,7 +162,8 @@ def main() -> None:
         idle_all()
         time.sleep(0.2)
         link.close()
-        print("closed.")
+        log.close()
+        print(f"closed. log: {log.dir}")
 
 
 if __name__ == "__main__":

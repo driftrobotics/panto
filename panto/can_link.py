@@ -47,6 +47,7 @@ SIM_HOME_JOINT_RAD = (0.4, 1.4)
 # CANSimple command ids (Firmware/communication/can/can_simple.hpp).
 CMD = {
     "Heartbeat": 0x001,
+    "Get_Error": 0x003,
     "Set_Axis_State": 0x007,
     "Get_Encoder_Estimates": 0x009,
     "Set_Controller_Mode": 0x00B,
@@ -62,6 +63,7 @@ CMD = {
 # Base message names required in the DBC, validated for *both* nodes at load.
 REQUIRED_MESSAGES = (
     "Heartbeat",
+    "Get_Error",
     "Set_Axis_State",
     "Get_Encoder_Estimates",
     "Set_Controller_Mode",
@@ -123,8 +125,30 @@ class Feedback:
     enc_stamp: float | None = None       # monotonic time of last encoder frame
     iq_stamp: float | None = None
     axis_state: int = 0
-    axis_error: int = 0
+    axis_error: int = 0             # Heartbeat's Axis_Error: active | disarm, combined
+    active_errors: int = 0          # Get_Error.Active_Errors: wrong *right now*
+    disarm_reason: int = 0          # Get_Error.Disarm_Reason: latched, why it dropped to IDLE
     heartbeat_stamp: float | None = None
+    error_stamp: float | None = None
+
+
+@dataclass(frozen=True)
+class NodeStatus:
+    """Public snapshot of one axis's health, for logging / telemetry.
+
+    ``active_errors`` / ``disarm_reason`` come from the dedicated ``Get_Error``
+    frame (0x003); ``axis_error`` is Heartbeat's combined active|disarm field,
+    kept for backward compat with :meth:`CanLink.axis_errors`. A node can be
+    IDLE with ``active_errors == 0`` and a non-zero ``disarm_reason`` — that's a
+    past protective trip, not an ongoing fault (see dbc/README.md).
+    """
+
+    node_id: int
+    axis_state: int
+    axis_error: int
+    active_errors: int
+    disarm_reason: int
+    age_s: float
 
 
 def _open_bus(interface: str, channel: str, bitrate: int) -> can.BusABC:
@@ -183,6 +207,7 @@ class CanLink:
             self._rx_map[self._frame_id(nid, "Get_Encoder_Estimates")] = (i, "encoder")
             self._rx_map[self._frame_id(nid, "Heartbeat")] = (i, "heartbeat")
             self._rx_map[self._frame_id(nid, "Get_Iq")] = (i, "iq")
+            self._rx_map[self._frame_id(nid, "Get_Error")] = (i, "error")
 
     # ------------------------------------------------------------------ dbc
 
@@ -332,6 +357,7 @@ class CanLink:
         enc_msgs = {i: self._msg(nid, "Get_Encoder_Estimates") for nid, i in self._idx.items()}
         hb_msgs = {i: self._msg(nid, "Heartbeat") for nid, i in self._idx.items()}
         iq_msgs = {i: self._msg(nid, "Get_Iq") for nid, i in self._idx.items()}
+        err_msgs = {i: self._msg(nid, "Get_Error") for nid, i in self._idx.items()}
         while not self._stop.is_set():
             try:
                 frame = self._bus.recv(timeout=0.2)
@@ -370,6 +396,13 @@ class CanLink:
                         fb.axis_state = as_int(d.get("Axis_State", 0))
                         fb.axis_error = as_int(d.get("Axis_Error", 0))
                         fb.heartbeat_stamp = now
+                elif kind == "error":
+                    d = err_msgs[i].decode(frame.data)
+                    with self._lock:
+                        fb = self._feedback[i]
+                        fb.active_errors = as_int(d.get("Active_Errors", 0))
+                        fb.disarm_reason = as_int(d.get("Disarm_Reason", 0))
+                        fb.error_stamp = now
             except Exception:
                 continue
 
@@ -403,6 +436,29 @@ class CanLink:
     def axis_errors(self) -> tuple[int, int]:
         with self._lock:
             return self._feedback[0].axis_error, self._feedback[1].axis_error
+
+    def node_status(self) -> tuple[NodeStatus, NodeStatus]:
+        """Full health snapshot per node — axis_state, live + latched errors.
+
+        The thing to log every tick if you want to catch "which axis dropped
+        out and why" without having to reconstruct it from a raw candump after
+        the fact.
+        """
+        now = time.monotonic()
+        with self._lock:
+            out = []
+            for nid in self._node_ids:
+                fb = self._feedback[self._idx[nid]]
+                age = now - fb.heartbeat_stamp if fb.heartbeat_stamp is not None else float("inf")
+                out.append(NodeStatus(
+                    node_id=nid,
+                    axis_state=fb.axis_state,
+                    axis_error=fb.axis_error,
+                    active_errors=fb.active_errors,
+                    disarm_reason=fb.disarm_reason,
+                    age_s=age,
+                ))
+        return tuple(out)  # type: ignore[return-value]
 
     def counters(self) -> tuple[int, int]:
         with self._lock:

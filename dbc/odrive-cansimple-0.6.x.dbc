@@ -1,4 +1,4 @@
-VERSION "0.6.x-panto (0.5.6 base; Heartbeat patched to fw 0.6.x layout, see README.md)"
+VERSION "0.6.x-panto (0.5.6 base; Heartbeat + Get_Motor_Error patched to fw 0.6.x, see README.md)"
 
 
 NS_ : 
@@ -42,8 +42,9 @@ BO_ 1 Axis0_Heartbeat: 8 ODrive_Axis0
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 3 Axis0_Get_Motor_Error: 8 ODrive_Axis0
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 3 Axis0_Get_Error: 8 ODrive_Axis0
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 4 Axis0_Get_Encoder_Error: 8 ODrive_Axis0
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -135,8 +136,9 @@ BO_ 33 Axis1_Heartbeat: 8 ODrive_Axis1
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 35 Axis1_Get_Motor_Error: 8 ODrive_Axis1
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 35 Axis1_Get_Error: 8 ODrive_Axis1
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 36 Axis1_Get_Encoder_Error: 8 ODrive_Axis1
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -228,8 +230,9 @@ BO_ 65 Axis2_Heartbeat: 8 ODrive_Axis2
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 67 Axis2_Get_Motor_Error: 8 ODrive_Axis2
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 67 Axis2_Get_Error: 8 ODrive_Axis2
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 68 Axis2_Get_Encoder_Error: 8 ODrive_Axis2
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -321,8 +324,9 @@ BO_ 97 Axis3_Heartbeat: 8 ODrive_Axis3
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 99 Axis3_Get_Motor_Error: 8 ODrive_Axis3
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 99 Axis3_Get_Error: 8 ODrive_Axis3
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 100 Axis3_Get_Encoder_Error: 8 ODrive_Axis3
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -414,8 +418,9 @@ BO_ 129 Axis4_Heartbeat: 8 ODrive_Axis4
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 131 Axis4_Get_Motor_Error: 8 ODrive_Axis4
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 131 Axis4_Get_Error: 8 ODrive_Axis4
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 132 Axis4_Get_Encoder_Error: 8 ODrive_Axis4
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -507,8 +512,9 @@ BO_ 161 Axis5_Heartbeat: 8 ODrive_Axis5
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 163 Axis5_Get_Motor_Error: 8 ODrive_Axis5
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 163 Axis5_Get_Error: 8 ODrive_Axis5
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 164 Axis5_Get_Encoder_Error: 8 ODrive_Axis5
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -600,8 +606,9 @@ BO_ 193 Axis6_Heartbeat: 8 ODrive_Axis6
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 195 Axis6_Get_Motor_Error: 8 ODrive_Axis6
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 195 Axis6_Get_Error: 8 ODrive_Axis6
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 196 Axis6_Get_Encoder_Error: 8 ODrive_Axis6
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
@@ -693,8 +700,9 @@ BO_ 225 Axis7_Heartbeat: 8 ODrive_Axis7
  SG_ Axis_State : 32|8@1+ (1,0) [0|0] ""  Master
  SG_ Axis_Error : 0|32@1+ (1,0) [0|0] ""  Master
 
-BO_ 227 Axis7_Get_Motor_Error: 8 ODrive_Axis7
- SG_ Motor_Error : 0|32@1+ (1,0) [0|0] ""  Master
+BO_ 227 Axis7_Get_Error: 8 ODrive_Axis7
+ SG_ Active_Errors : 0|32@1+ (1,0) [0|0] ""  Master
+ SG_ Disarm_Reason : 32|32@1+ (1,0) [0|0] ""  Master
 
 BO_ 228 Axis7_Get_Encoder_Error: 8 ODrive_Axis7
  SG_ Encoder_Error : 0|32@1+ (1,0) [0|0] ""  Master
