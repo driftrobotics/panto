@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartKnob / ODrive</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --panel: #161a22;
+    --line: #262c38;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #5a12971a;
+    --dot: #5064c8;
+    --fill: #5a1297;
+    --warn: #d4763a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: minmax(0,1fr) 320px; min-height: 100vh;
+  }
+  @media (max-width: 820px) { body { grid-template-columns: 1fr; } }
+  main { display: grid; place-items: center; padding: 24px; gap: 16px; align-content: center; }
+  canvas { touch-action: none; cursor: grab; border-radius: 50%; }
+  canvas:active { cursor: grabbing; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 20px; overflow-y: auto; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+       margin: 0 0 10px; font-weight: 600; }
+  section + section { margin-top: 24px; }
+  button {
+    display: block; width: 100%; text-align: left; padding: 8px 10px; margin-bottom: 4px;
+    background: transparent; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  button:hover { border-color: #3a4152; background: #1c212b; }
+  button[aria-pressed="true"] { border-color: var(--dot); background: #1a1f33; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; }
+  dd.warn { color: var(--warn); }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+  #status { font-size: 12px; color: var(--muted); }
+  #status.live::before { content: "● "; color: #4ba36a; }
+  #status.dead::before { content: "● "; color: #b4453f; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="dial" width="440" height="440"></canvas>
+  <div id="status" class="dead">connecting…</div>
+</main>
+
+<aside>
+  <section>
+    <h2>Mode</h2>
+    <div id="presets"></div>
+  </section>
+
+  <section>
+    <h2>State</h2>
+    <dl>
+      <dt>position</dt><dd id="s-pos">–</dd>
+      <dt>sub-position</dt><dd id="s-sub">–</dd>
+      <dt>angle</dt><dd id="s-angle">–</dd>
+      <dt>velocity</dt><dd id="s-vel">–</dd>
+      <dt>pos_gain</dt><dd id="s-gain">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Loop health</h2>
+    <p class="hint">max steps &gt; 1 means the outer loop is behind and clicks
+      will smear. Watch it during fast spins.</p>
+    <dl>
+      <dt>rate</dt><dd id="h-rate">–</dd>
+      <dt>jitter p95</dt><dd id="h-jitter">–</dd>
+      <dt>feedback age</dt><dd id="h-age">–</dd>
+      <dt>max steps</dt><dd id="h-steps">–</dd>
+      <dt>overruns</dt><dd id="h-over">–</dd>
+      <dt>tx / rx</dt><dd id="h-txrx">–</dd>
+    </dl>
+  </section>
+
+  <section id="sim-section" hidden>
+    <h2>Simulator</h2>
+    <p class="hint">No hardware attached. Drag the dial to apply torque.</p>
+  </section>
+</aside>
+
+<script>
+const TAU = Math.PI * 2;
+const canvas = document.getElementById('dial');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+let state = null;
+let presets = [];
+let simEnabled = false;
+let ws = null;
+
+/* ---------------------------------------------------------------- transport */
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'connected'; statusEl.className = 'live'; };
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected — retrying';
+    statusEl.className = 'dead';
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'state') { state = msg; updatePanel(msg); }
+    else if (msg.type === 'presets') { presets = msg.presets; renderPresets(); }
+    else if (msg.type === 'capabilities') {
+      simEnabled = msg.sim;
+      document.getElementById('sim-section').hidden = !simEnabled;
+    }
+  };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+/* ------------------------------------------------------------------- panel */
+
+function renderPresets() {
+  const host = document.getElementById('presets');
+  host.innerHTML = '';
+  presets.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.textContent = (p.text || `preset ${i}`).replace(/\n/g, ' · ');
+    b.onclick = () => {
+      send({ type: 'preset', index: i });
+      [...host.children].forEach(c => c.setAttribute('aria-pressed', 'false'));
+      b.setAttribute('aria-pressed', 'true');
+    };
+    b.setAttribute('aria-pressed', String(i === 0));
+    host.appendChild(b);
+  });
+}
+
+const set = (id, v, warn = false) => {
+  const el = document.getElementById(id);
+  el.textContent = v;
+  el.className = warn ? 'warn' : '';
+};
+
+function updatePanel(s) {
+  set('s-pos', s.position);
+  set('s-sub', s.subPositionUnit.toFixed(3));
+  set('s-angle', `${(s.angleRad * 180 / Math.PI).toFixed(1)}°`);
+  set('s-vel', `${(s.velocityRadS / TAU).toFixed(2)} rev/s`);
+  set('s-gain', s.posGain.toFixed(1));
+
+  const st = s.stats;
+  set('h-rate', `${st.rateHz} Hz`, st.rateHz > 0 && st.rateHz < 150);
+  set('h-jitter', `${st.jitterP95Ms} ms`, st.jitterP95Ms > 2);
+  set('h-age', `${st.feedbackAgeMs} ms`, st.feedbackAgeMs > 10);
+  set('h-steps', st.maxSteps, st.maxSteps > 1);
+  set('h-over', st.overruns, st.overruns > 0);
+  set('h-txrx', `${st.tx} / ${st.rx}`);
+}
+
+/* ------------------------------------------------------------------ drawing */
+/* Port of firmware/src/display_task.cpp:66-216 -- same arc, bounds easing and
+   detent dots, drawn with canvas instead of a TFT sprite. */
+
+function draw() {
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2, radius = w / 2 - 4;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(cx, cy, radius, 0, TAU); ctx.fill();
+
+  if (!state) { requestAnimationFrame(draw); return; }
+
+  const cfg = state.config;
+  const width = cfg.position_width_radians;
+  const numPositions = cfg.max_position - cfg.min_position + 1;
+
+  // Rubber-band easing past the bounds, so hitting an endstop reads visually
+  // as a limit rather than as continued travel.
+  let adjustedSub = state.subPositionUnit * width;
+  if (numPositions > 0) {
+    const cap = 5 * Math.PI / 180;
+    if (state.position === cfg.min_position && state.subPositionUnit < 0) {
+      adjustedSub = -Math.log(1 - state.subPositionUnit * width / cap) * cap;
+    } else if (state.position === cfg.max_position && state.subPositionUnit > 0) {
+      adjustedSub = Math.log(1 + state.subPositionUnit * width / cap) * cap;
+    }
+  }
+
+  let leftBound = Math.PI / 2, rightBound = 0;
+  if (numPositions > 0) {
+    const rangeRadians = (numPositions - 1) * width;
+    const start = -Math.PI / 2 - rangeRadians / 2;
+    leftBound = start + (state.position - cfg.min_position) * width + adjustedSub;
+    rightBound = leftBound;
+    // Sweep from the current value back to the minimum.
+    const filledFrom = start;
+    drawArc(cx, cy, radius, filledFrom, leftBound, 'rgba(90,18,151,0.85)');
+    drawTicks(cx, cy, radius, start, numPositions, width, cfg);
+  } else {
+    // Unbounded: a single indicator that just follows the knob.
+    const a = -Math.PI / 2 + state.subPositionUnit * width + state.position * width;
+    drawArc(cx, cy, radius, a - 0.08, a + 0.08, 'rgba(90,18,151,0.85)');
+  }
+
+  // Current-position pointer.
+  const pointer = numPositions > 0 ? leftBound
+    : -Math.PI / 2 + state.subPositionUnit * width + state.position * width;
+  ctx.strokeStyle = state.outOfBounds ? '#d4763a' : '#5064c8';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(pointer) * (radius - 42), cy + Math.sin(pointer) * (radius - 42));
+  ctx.lineTo(cx + Math.cos(pointer) * (radius - 6), cy + Math.sin(pointer) * (radius - 6));
+  ctx.stroke();
+
+  // Value + description.
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '600 64px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText(String(state.position), cx, cy - 6);
+
+  ctx.font = '14px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillStyle = '#8b93a3';
+  (cfg.text || '').split('\n').forEach((line, i) => {
+    ctx.fillText(line, cx, cy + 48 + i * 19);
+  });
+
+  requestAnimationFrame(draw);
+}
+
+function drawArc(cx, cy, radius, from, to, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 22;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius - 12, Math.min(from, to), Math.max(from, to));
+  ctx.stroke();
+}
+
+function drawTicks(cx, cy, radius, start, numPositions, width, cfg) {
+  // Cap the tick count: 256 fine positions would just be a smear.
+  if (numPositions > 64) return;
+  for (let i = 0; i < numPositions; i++) {
+    const a = start + i * width;
+    const pos = cfg.min_position + i;
+    const magnetic = cfg.detent_positions.length > 0;
+    const active = !magnetic || cfg.detent_positions.includes(pos);
+    ctx.fillStyle = active ? '#5064c8' : '#2b3040';
+    const r = radius - 12;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r, active ? 3 : 2, 0, TAU);
+    ctx.fill();
+  }
+}
+
+/* --------------------------------------------------------- sim drag-to-turn */
+
+let dragging = false, lastAngle = 0;
+
+const angleAt = (ev) => {
+  const r = canvas.getBoundingClientRect();
+  const t = ev.touches ? ev.touches[0] : ev;
+  return Math.atan2(t.clientY - r.top - r.height / 2, t.clientX - r.left - r.width / 2);
+};
+
+function dragStart(ev) {
+  if (!simEnabled) return;
+  dragging = true; lastAngle = angleAt(ev); ev.preventDefault();
+}
+function dragMove(ev) {
+  if (!dragging) return;
+  const a = angleAt(ev);
+  let d = a - lastAngle;
+  while (d > Math.PI) d -= TAU;
+  while (d < -Math.PI) d += TAU;
+  lastAngle = a;
+  // Proportional "hand": torque toward where the pointer moved.
+  send({ type: 'torque', value: Math.max(-0.05, Math.min(0.05, d * 0.6)) });
+  ev.preventDefault();
+}
+function dragEnd() {
+  if (!dragging) return;
+  dragging = false;
+  send({ type: 'torque', value: 0 });
+}
+
+canvas.addEventListener('mousedown', dragStart);
+window.addEventListener('mousemove', dragMove);
+window.addEventListener('mouseup', dragEnd);
+canvas.addEventListener('touchstart', dragStart, { passive: false });
+window.addEventListener('touchmove', dragMove, { passive: false });
+window.addEventListener('touchend', dragEnd);
+
+connect();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
