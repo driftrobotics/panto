@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>panto</title>
+<!--
+  Single-page UI. Websocket client of panto.web (default ws://<host>:8080).
+  Keep it dependency-light like odrive_knob/ui/index.html.
+
+  Panels (see spec "Components"):
+    status bar   idle / error / FOC state, latency, fps, control-loop Hz, currents
+    settings     link lengths, torques, max driven torque, snap distance/strength
+    calibration  zero positions, j+/j- limits, work area (default = reach arc,
+                 or draw it with the linkage)
+    running      record / playback trajectory (cartesian), draw shape
+                 (circle / bezier / line / square / poly), toggle snap-to,
+                 snap-to-grid hotkey
+
+  Must send a periodic heartbeat; the runtime idles the motors after 5 s silence.
+-->
+<body>
+  <p>panto UI — not implemented yet. See HANDOFF.md milestone 2.</p>
+</body>
