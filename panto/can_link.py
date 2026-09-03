@@ -296,11 +296,21 @@ class CanLink:
         )
 
     def stop(self) -> None:
-        for nid in self._node_ids:
-            try:
-                self._send(nid, "Set_Axis_State", {"Axis_Requested_State": AXIS_STATE_IDLE})
-            except CanLinkError:
-                pass
+        """Command both axes to IDLE, then tear down. Idempotent."""
+        if self._bus is not None:
+            for nid in self._node_ids:
+                try:
+                    self._send(nid, "Set_Axis_State", {"Axis_Requested_State": AXIS_STATE_IDLE})
+                except CanLinkError:
+                    pass
+        self.close()
+
+    def close(self) -> None:
+        """Tear down threads + bus without transmitting anything. Idempotent.
+
+        Use this instead of :meth:`stop` for passive/observe sessions where the
+        drives must not receive any command frame.
+        """
         self._stop.set()
         if self._rx_thread is not None:
             self._rx_thread.join(timeout=1.0)
