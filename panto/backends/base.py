@@ -17,6 +17,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+#: ODrive ``vel_limit`` (turn/s) the backends install alongside the current cap.
+#: Not force-relevant — it only bounds runaway — so a fixed generous value is
+#: fine until stream D grows a real config field (see report).
+DEFAULT_VEL_LIMIT_TURN_S = 20.0
+
 
 @dataclass(frozen=True)
 class ImpedanceCommand:
@@ -28,6 +33,19 @@ class ImpedanceCommand:
 
 
 class ImpedanceBackend(abc.ABC):
+    """Common ctor + lifecycle; subclasses implement the command mapping.
+
+    ``enter`` runs once on mode entry (controller mode + limits), ``apply`` every
+    tick, ``relax`` drops the interaction force to zero (transparent / fault).
+    """
+
+    def __init__(self, link, config) -> None:
+        self._link = link          # can_link.CanLink
+        self._config = config      # config.Config
+
+    def enter(self) -> None:
+        """Put the drives in this backend's control mode. Default: no-op."""
+
     @abc.abstractmethod
     def apply(self, cmd: ImpedanceCommand) -> None:
         """Render ``cmd`` on the drives for one tick."""
