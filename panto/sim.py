@@ -340,10 +340,8 @@ class PantoSim:
                     self._emit(nid, "Heartbeat", {
                         "Axis_Error": 0,
                         "Axis_State": plant.axis_state,
-                        "Motor_Error_Flag": 0,
-                        "Encoder_Error_Flag": 0,
-                        "Controller_Error_Flag": 0,
-                        "Trajectory_Done_Flag": 0,
+                        "Procedure_Result": 0,
+                        "Trajectory_Done_Flag": 1,
                     })
                 next_hb = now + p.heartbeat_period
             time.sleep(0.0005)

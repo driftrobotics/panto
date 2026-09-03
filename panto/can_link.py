@@ -37,7 +37,7 @@ import numpy as np
 
 TWO_PI = 2.0 * np.pi
 
-DEFAULT_DBC = Path(__file__).resolve().parent.parent / "dbc" / "odrive-cansimple-0.5.6.dbc"
+DEFAULT_DBC = Path(__file__).resolve().parent.parent / "dbc" / "odrive-cansimple-0.6.x.dbc"
 
 #: Joint angles (rad, elbow-up) the --sim rig powers up at. Well inside the
 #: workspace and away from the extension singularity so the arm has force
