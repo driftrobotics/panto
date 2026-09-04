@@ -77,10 +77,10 @@ def _recv_decode(host, node_id, base_name, window=0.25):
     raise AssertionError(f"no Axis{node_id}_{base_name} seen")
 
 
-def _arm(host, node_id, gain=200.0):
+def _arm(host, node_id, gain=500.0):
     _send(host, node_id, "Set_Controller_Mode",
           {"Control_Mode": CONTROL_MODE_POSITION, "Input_Mode": INPUT_MODE_PASSTHROUGH})
-    _send(host, node_id, "Set_Limits", {"Velocity_Limit": 40.0, "Current_Limit": 0.8})
+    _send(host, node_id, "Set_Limits", {"Velocity_Limit": 40.0, "Current_Limit": 4.0})
     _send(host, node_id, "Set_Pos_Gain", {"Pos_Gain": gain})
     _send(host, node_id, "Set_Axis_State",
           {"Axis_Requested_State": AXIS_STATE_CLOSED_LOOP_CONTROL})
@@ -137,15 +137,22 @@ def test_position_loop_converges_and_holds(rig):
 
 def test_position_loop_resists_a_disturbance(rig):
     host, sim = rig
-    _arm(host, 0, gain=320.0)
-    end = time.monotonic() + 1.0
+    _arm(host, 0)
+    end = time.monotonic() + 2.0
     while time.monotonic() < end:
         _send(host, 0, "Set_Input_Pos", {"Input_Pos": 0.0, "Vel_FF": 0.0, "Torque_FF": 0.0})
         time.sleep(0.02)
-    # a hand torque below the current-limit torque (0.8*0.035=0.028) should be
-    # mostly held
-    sim.set_external_torque(0, 0.02)
-    t = time.monotonic() + 0.6
+    # At the real vel_gain (2.5e-4, read off the physical drives 2026-09-03),
+    # the max torque this loop can hold *statically* is vel_gain * Velocity_Limit
+    # = 0.00025 * 40 = 0.01 N.m -- once the position error is large enough to
+    # saturate Velocity_Limit, more error buys no more corrective torque. A
+    # disturbance at or above that ceiling has no stable near-zero equilibrium
+    # (it settles wherever the saturated command happens to balance it, tens of
+    # degrees out) -- this matches what the hardware bring-up sessions found:
+    # holding authority here is bandwidth/velocity-limited, not current-limited.
+    # 0.005 N.m is comfortably under the ceiling.
+    sim.set_external_torque(0, 0.005)
+    t = time.monotonic() + 1.2
     while time.monotonic() < t:
         _send(host, 0, "Set_Input_Pos", {"Input_Pos": 0.0, "Vel_FF": 0.0, "Torque_FF": 0.0})
         time.sleep(0.02)

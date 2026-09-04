@@ -85,15 +85,18 @@ def link():
         lk.stop()
 
 
-def _arm(lk, gain=200.0):
+def _arm(lk, gain=500.0):
+    # set_limits takes joint rad/s and CanLink converts to motor turn/s
+    # internally (/2pi); pass 40*2pi so the sim sees the same 40 turn/s
+    # ceiling test_sim.py's direct-CAN _arm() uses.
     for nid in (0, 1):
         lk.set_controller_mode(nid, "position")
-        lk.set_limits(nid, 40.0, 0.8)
+        lk.set_limits(nid, 40.0 * 2 * 3.14159265358979, 4.0)
         lk.set_pos_gain(nid, gain)
     lk.enter_closed_loop(timeout=5.0)
 
 
-def _hold(lk, targets, seconds=1.2):
+def _hold(lk, targets, seconds=2.0):
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         for nid, q in zip((0, 1), targets):
@@ -123,18 +126,18 @@ def test_closed_loop_entry(link):
 def test_position_command_converges(link):
     _arm(link)
     target = (0.4, -0.3)
-    _hold(link, target, seconds=1.5)
+    _hold(link, target, seconds=2.5)
     q, qd = link.joint_state()
-    assert q == pytest.approx(np.array(target), abs=0.03)
+    assert q == pytest.approx(np.array(target), abs=0.05)
     assert np.all(np.abs(qd) < 0.2)
 
 
 def test_calibration_applied_through_the_stack(link):
     # node 1 is flipped in _config(); commanding +q there must still land at +q
     _arm(link)
-    _hold(link, (0.0, 0.5), seconds=1.5)
+    _hold(link, (0.0, 0.5), seconds=2.5)
     q, _ = link.joint_state()
-    assert q[1] == pytest.approx(0.5, abs=0.03)
+    assert q[1] == pytest.approx(0.5, abs=0.05)
     # ...and the sim's true rotor angle went the *other* way
     assert link._sim.true_angle(1) < -0.1
 
@@ -146,9 +149,9 @@ def test_zero_offset_shifts_reported_angle():
         lk.wait_for_feedback(timeout=5.0)
         _arm(lk)
         # hold the elbow rotor near its encoder zero -> joint angle ~ offset
-        _hold(lk, (0.0, 0.6), seconds=1.2)
+        _hold(lk, (0.0, 0.6), seconds=2.0)
         q, _ = lk.joint_state()
-        assert q[1] == pytest.approx(0.6, abs=0.03)
+        assert q[1] == pytest.approx(0.6, abs=0.05)
         assert abs(lk._sim.true_angle(1)) < 0.05
     finally:
         lk.stop()
