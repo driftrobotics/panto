@@ -85,7 +85,7 @@ def link():
         lk.stop()
 
 
-def _arm(lk, gain=500.0):
+def _arm(lk, gain=80.0):
     # set_limits takes joint rad/s and CanLink converts to motor turn/s
     # internally (/2pi); pass 40*2pi so the sim sees the same 40 turn/s
     # ceiling test_sim.py's direct-CAN _arm() uses.

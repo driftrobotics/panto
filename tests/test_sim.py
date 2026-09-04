@@ -77,7 +77,7 @@ def _recv_decode(host, node_id, base_name, window=0.25):
     raise AssertionError(f"no Axis{node_id}_{base_name} seen")
 
 
-def _arm(host, node_id, gain=500.0):
+def _arm(host, node_id, gain=80.0):
     _send(host, node_id, "Set_Controller_Mode",
           {"Control_Mode": CONTROL_MODE_POSITION, "Input_Mode": INPUT_MODE_PASSTHROUGH})
     _send(host, node_id, "Set_Limits", {"Velocity_Limit": 40.0, "Current_Limit": 4.0})
@@ -142,21 +142,17 @@ def test_position_loop_resists_a_disturbance(rig):
     while time.monotonic() < end:
         _send(host, 0, "Set_Input_Pos", {"Input_Pos": 0.0, "Vel_FF": 0.0, "Torque_FF": 0.0})
         time.sleep(0.02)
-    # At the real vel_gain (2.5e-4, read off the physical drives 2026-09-03),
-    # the max torque this loop can hold *statically* is vel_gain * Velocity_Limit
-    # = 0.00025 * 40 = 0.01 N.m -- once the position error is large enough to
-    # saturate Velocity_Limit, more error buys no more corrective torque. A
-    # disturbance at or above that ceiling has no stable near-zero equilibrium
-    # (it settles wherever the saturated command happens to balance it, tens of
-    # degrees out) -- this matches what the hardware bring-up sessions found:
-    # holding authority here is bandwidth/velocity-limited, not current-limited.
-    # 0.005 N.m is comfortably under the ceiling.
-    sim.set_external_torque(0, 0.005)
+    # This loop's max *static* holding torque is vel_gain * Velocity_Limit --
+    # at the drives' current (2026-09-03, bumped 10x from the measured 2.5e-4)
+    # vel_gain=2.5e-3 and this rig's 40 turn/s limit, that ceiling is 0.1 N.m.
+    # 0.002 N.m is comfortably under it (steady-state offset ~ tau/(pos_gain*
+    # vel_gain), well inside a small-signal, non-saturated regime).
+    sim.set_external_torque(0, 0.002)
     t = time.monotonic() + 1.2
     while time.monotonic() < t:
         _send(host, 0, "Set_Input_Pos", {"Input_Pos": 0.0, "Vel_FF": 0.0, "Torque_FF": 0.0})
         time.sleep(0.02)
-    assert abs(sim.true_angle(0)) < 0.3
+    assert abs(sim.true_angle(0)) < 0.1
 
 
 def test_encoder_estimate_is_quantised(rig):
