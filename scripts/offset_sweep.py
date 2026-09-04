@@ -29,7 +29,7 @@ from panto.backends.base import ImpedanceCommand
 from panto.can_link import CanLink
 from panto.config import Config
 from panto.constraints import Point
-from panto.kinematics import forward, min_singular_value
+from panto.kinematics import Unreachable, forward, min_singular_value
 from panto.telemetry import RunLogger
 
 DIRECTIONS = {
@@ -127,8 +127,8 @@ def main() -> None:
 
         q0, _ = link.joint_state()
         pose0 = forward(q0, config.geo)
-        print(f"  start pose=({pose0[0]*1e3:.1f}, {pose0[1]*1e3:.1f})mm  "
-              f"sigma_min={min_singular_value(q0, config.geo):.4f}")
+        sig0 = min_singular_value(q0, config.geo)
+        print(f"  start pose=({pose0[0]*1e3:.1f}, {pose0[1]*1e3:.1f})mm  sigma_min={sig0:.4f}")
 
         backend.enter()
         for i, m in enumerate(config.motors):
@@ -136,6 +136,25 @@ def main() -> None:
         print(">>> entering CLOSED_LOOP_CONTROL <<<")
         log.event(">>> entering CLOSED_LOOP_CONTROL <<<")
         link.enter_closed_loop(timeout=5.0)
+
+        if sig0 < config.sigma_min_threshold:
+            # Too close to a singularity (e.g. sitting near full extension) to
+            # step +/-x/y meaningfully -- every direction risks Unreachable and
+            # force authority there is ~0 anyway. Pull inward along the same
+            # ray to a better-conditioned pose before centring the sweep on it.
+            inward = pose0 * 0.7
+            msg = (f"start sigma_min={sig0:.4f} < threshold "
+                  f"{config.sigma_min_threshold:.4f} -- pulling in to "
+                  f"({inward[0]*1e3:.1f},{inward[1]*1e3:.1f})mm before sweeping")
+            print(f"  ! {msg}")
+            log.event(msg, level="WARN")
+            _run_to(link, backend, config, log, K, force_limit, inward, 3.0, args.rate, "recentre")
+            q0, _ = link.joint_state()
+            pose0 = forward(q0, config.geo)
+            sig0 = min_singular_value(q0, config.geo)
+            print(f"  new centre pose=({pose0[0]*1e3:.1f}, {pose0[1]*1e3:.1f})mm  "
+                  f"sigma_min={sig0:.4f}")
+
         print(f"    closed loop. Sweeping {list(DIRECTIONS)}\n")
 
         # settle at the start pose first
@@ -144,8 +163,13 @@ def main() -> None:
         for name, unit in DIRECTIONS.items():
             target = pose0 + unit * (args.step * 1e-3)
             log.event(f"-> {name}: target=({target[0]*1e3:.1f},{target[1]*1e3:.1f})mm")
-            err, cur, peak = _run_to(link, backend, config, log, K, force_limit, target,
-                                      args.settle, args.rate, f"offset_{name}")
+            try:
+                err, cur, peak = _run_to(link, backend, config, log, K, force_limit, target,
+                                          args.settle, args.rate, f"offset_{name}")
+            except Unreachable as exc:
+                print(f"  {name:>3}  UNREACHABLE from this pose ({exc}) -- skipped")
+                log.event(f"{name} unreachable: {exc}", level="WARN")
+                continue
             results.append(DirResult(name, err * 1e3, tuple(cur), tuple(peak)))
             print(f"  {name:>3}  settle_err={err*1e3:6.2f}mm  "
                   f"cur=({cur[0]:+.3f},{cur[1]:+.3f})A  peak=({peak[0]:.3f},{peak[1]:.3f})A")
@@ -153,14 +177,21 @@ def main() -> None:
             _run_to(link, backend, config, log, K, force_limit, pose0,
                     args.return_settle, args.rate, f"return_{name}")
 
+        if not results:
+            raise SystemExit("every direction was unreachable from this pose")
+
+        by_name = {r.name: r for r in results}
         avg_err = np.mean([r.settle_err_mm for r in results])
         avg_cur_mag = np.mean([np.linalg.norm(r.settle_cur) for r in results])
-        x_asym = results[0].settle_err_mm - results[1].settle_err_mm   # +x - (-x)
-        y_asym = results[2].settle_err_mm - results[3].settle_err_mm   # +y - (-y)
-        print(f"\n  avg settle_err = {avg_err:.2f} mm   avg |current| = {avg_cur_mag:.3f} A")
-        print(f"  +x - (-x) = {x_asym:+.2f} mm   +y - (-y) = {y_asym:+.2f} mm  (symmetry check)")
+        print(f"\n  avg settle_err = {avg_err:.2f} mm   avg |current| = {avg_cur_mag:.3f} A  "
+              f"(n={len(results)}/4 directions)")
+        for a, b in (("+x", "-x"), ("+y", "-y")):
+            if a in by_name and b in by_name:
+                asym = by_name[a].settle_err_mm - by_name[b].settle_err_mm
+                print(f"  {a} - {b} = {asym:+.2f} mm  (symmetry check)")
+                log.event(f"symmetry {a}-{b} = {asym:.3f}mm")
         log.event(f"summary: avg_err_mm={avg_err:.3f} avg_cur_a={avg_cur_mag:.3f} "
-                 f"x_asym_mm={x_asym:.3f} y_asym_mm={y_asym:.3f}")
+                 f"n={len(results)}/4")
     except KeyboardInterrupt:
         print("\n! interrupted")
         log.event("interrupted", level="WARN")
