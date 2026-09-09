@@ -35,7 +35,7 @@ Modes
 ``velnoise``  HARDWARE ONLY (raises under --sim): sweeps encoder_bandwidth
               via /tmp/odrive_set_encbw.py on this host (a standalone
               odrivetool script -- see its docstring), sampling vel_estimate
-              noise (idle) at each setting, then restores 100. Does not open
+              noise (idle) at each setting, then restores 300. Does not open
               a CanLink of its own while that helper runs (its own docstring
               warns against a concurrent bus owner).
 ``all``       runs latency, chirp, friction, cogging (+ velnoise if not
@@ -89,7 +89,7 @@ from panto.telemetry import RunLogger
 MAX_FEEDBACK_AGE_S = 0.1
 JOINT_NAMES = {0: "shoulder", 1: "elbow"}
 ENCBW_HELPER = Path("/tmp/odrive_set_encbw.py")
-DEFAULT_ENCBW = 100.0
+DEFAULT_ENCBW = 300.0   # setting of record since 2026-09-08 (saved on both drives)
 
 
 class Aborted(RuntimeError):

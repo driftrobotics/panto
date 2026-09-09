@@ -160,5 +160,35 @@
     "max_pos_gain": 500,
     "notes": "OPERATING POINT OF RECORD after the 2026-09-08 root cause (encoder_bandwidth 300 saved on both drives; 100 added 40-85 deg of velocity-estimate lag at 10-20 Hz). 5 mm step: overshoot 0.44 mm, settles 69 ms, ss error 0.13 mm. K=50 and K=200 also converge (K=200: overshoot 0.63 mm). 25 mm box at 10-25 mm/s: RMS 2.8 mm, limited by shoulder harness stiffness (shoulder at 0.72 A RMS), elbow clean.",
     "verified": "2026-09-08 step_response-20260908-225426 (K100), -225341 (K50), -225511 (K200); trace_shape-20260908-225619/-225703"
+  },
+  "hover-K100-vl1": {
+    "stiffness": 100,
+    "vel_gain": 0.05,
+    "vel_limit": 1.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "Hover geometry (shoulder in free space, harness rerouted, 2026-09-09): shoulder friction ~0.1 A so the old friction damping is gone; vel_gain >= 0.1 excites a 41 Hz shoulder velocity-loop chatter at the 0.8 A cap (I2t ~2 A2s per run). vel_gain 0.05 + vel_limit 1 turn/s keeps the shoulder clean: +y 5 mm step overshoot 2.1 mm, ss 0.71 mm, settles ~2 s; +x with vel_limit 0.5: overshoot 0.30 mm, ss 0.12 mm, settle 0.13 s.",
+    "verified": "2026-09-09 step_response-20260909-231748 (+y vl1), -231859 (+x vl0.5)"
+  },
+  "hover-K25-vl1": {
+    "stiffness": 25,
+    "vel_gain": 0.05,
+    "vel_limit": 1.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "Conservative hover-geometry preset for shoulder-dominant (+y) moves: +y 5 mm step overshoot 1.8 mm, ss 0.47 mm, I2t 0.15 A2s. With a 1 s anchor ramp (vel_limit 5) overshoot 1.2 mm, ss 0.40 mm.",
+    "verified": "2026-09-09 step_response-20260909-231526, -231415 (ramped)"
   }
 }
