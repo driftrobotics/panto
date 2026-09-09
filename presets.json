@@ -1,0 +1,164 @@
+{
+  "hold-0p6": {
+    "stiffness": 25,
+    "vel_gain": 0.09,
+    "vel_limit": 20,
+    "current": 0.6,
+    "cap_slope": 0,
+    "cap_min": [
+      0.5,
+      0.5
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 20000,
+    "encoder_bandwidth": 100,
+    "drive": {},
+    "notes": "[CAVEAT: recorded with the step_response pos_gain bug \u2014 actual joint stiffness ~30x the stated K] [PRE-REWORK 2026-09-04, high-friction arm; do not use as-is on the reworked arm] only config that converged on a 5 mm step (overshoot 2 mm, decay 0.04) -- low force",
+    "verified": "2026-09-04, log step_response-20260904-2057xx (cap 0.6 run)"
+  },
+  "move-1p5-sched": {
+    "stiffness": 25,
+    "vel_gain": 0.09,
+    "vel_limit": 20,
+    "current": 1.5,
+    "cap_slope": 3.0,
+    "cap_min": [
+      0.9,
+      0.5
+    ],
+    "ff_scale": 0.7,
+    "max_pos_gain": null,
+    "encoder_bandwidth": 100,
+    "drive": {},
+    "notes": "[PRE-REWORK 2026-09-04, high-friction arm; do not use as-is on the reworked arm] slow ramped moves (goto_pose, >=8 s per 100 mm); shoulder can stall CCW near the end -- repeat the goto. 2026-09-04: recentring from 103 mm out stalled TWICE at ~23-25mm remaining (shoulder CCW ~73deg, 1.5A not enough); a third pass at --current 2.0 finished to 2.8mm. Prefer move-2A-sched if 1.5A stalls.",
+    "verified": "2026-09-04 (goto_pose 103 mm -> 22 mm remaining, then second pass, still stalled)"
+  },
+  "move-2A-sched": {
+    "stiffness": 25,
+    "vel_gain": 0.09,
+    "vel_limit": 20,
+    "current": 2.0,
+    "cap_slope": 3.0,
+    "cap_min": [
+      0.9,
+      0.5
+    ],
+    "ff_scale": 0.7,
+    "max_pos_gain": null,
+    "encoder_bandwidth": 100,
+    "drive": {},
+    "notes": "[PRE-REWORK 2026-09-04, high-friction arm; do not use as-is on the reworked arm] same as move-1p5-sched but current 2.0 -- 1.5A stalled the shoulder CCW twice at ~23-25mm remaining on a 103mm recentre; 2.0A finished to 2.8mm remaining on the third pass. Default preset for scripts/reset_pose.py.",
+    "verified": "2026-09-04 (goto_pose 103mm recentre, third pass, 2.8mm remaining)"
+  },
+  "step-2A-kv3": {
+    "stiffness": 25,
+    "vel_gain": 0.09,
+    "vel_limit": 20,
+    "current": 2.0,
+    "cap_slope": 3.0,
+    "cap_min": [
+      0.9,
+      0.5
+    ],
+    "ff_scale": 0.7,
+    "max_pos_gain": null,
+    "encoder_bandwidth": 100,
+    "drive": {
+      "enable_overspeed_error": false
+    },
+    "notes": "[CAVEAT: recorded with the step_response pos_gain bug \u2014 actual joint stiffness ~30x the stated K] [PRE-REWORK 2026-09-04, high-friction arm; do not use as-is on the reworked arm] un-feedforwarded comparison point for step-2A-kv3-ff1 (same gains, ff_scale 0.7 instead of 1.0) -- limit_cycle verdict",
+    "verified": "2026-09-04, log step_response-20260904-215823 on rig-host (limit_cycle)"
+  },
+  "step-2A-kv3-ff1": {
+    "stiffness": 25,
+    "vel_gain": 0.09,
+    "vel_limit": 20,
+    "current": 2.0,
+    "cap_slope": 3.0,
+    "cap_min": [
+      0.9,
+      0.5
+    ],
+    "ff_scale": 1.0,
+    "max_pos_gain": 20000,
+    "encoder_bandwidth": 100,
+    "drive": {},
+    "notes": "[CAVEAT: recorded with the step_response pos_gain bug \u2014 actual joint stiffness ~30x the stated K] [PRE-REWORK 2026-09-04, high-friction arm; do not use as-is on the reworked arm] best 2 A config so far: 5 mm step settles to +/-1 mm in 2.0 s, overshoot 6.3 mm, residual 5 Hz/1.5 mm decaying (0.58), ss error 1.5 mm, shoulder 1.17 A RMS -- shoulder stiction lurch dominates",
+    "verified": "2026-09-04, log step_response-20260904-220514 on rig-host"
+  },
+  "move-slow-0p3": {
+    "stiffness": 10,
+    "vel_gain": 0.09,
+    "vel_limit": 6,
+    "current": 0.3,
+    "cap_slope": 0,
+    "cap_min": [
+      0.3,
+      0.3
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 20000,
+    "notes": "[recorded at encoder_bandwidth 100 \u2014 superseded by pos-bw300-* presets] Post-rework (2026-09-08, low-friction arm): slow move, 15 s per 140 mm, no schedule, no FF. Verified with scripts.observe after IDLE: 140 mm move ended 9 mm from target with no lunge. Use this for reset_pose until retuned.",
+    "verified": "2026-09-08 goto_pose 114,208 -> 125.7,61.3 mm; observe confirmed"
+  },
+  "step-lin-K10": {
+    "stiffness": 10,
+    "vel_gain": 0.05,
+    "vel_limit": 1.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "[recorded at encoder_bandwidth 100 \u2014 superseded by pos-bw300-* presets] Post-rework, post-pos_gain-fix (2026-09-08): first clean 5 mm step \u2014 overshoot 0.0 mm, no oscillation, ss error 1.9 mm (friction vs a 10 N/m spring), peak 0.31 A, pos_gain sent [25, 20]. Linear regime: pos_gain\u00b7err stays under vel_limit and vel_gain\u00b72\u00b7vel_limit stays under the cap torque. REQUIRES vel_limit ~1 rad/s: the same gains with vel_limit 5 rad/s limit-cycle at ~12 Hz (step_response-20260908-205803).",
+    "verified": "2026-09-08 step_response-20260908-171856, tap-test hold point_hold-20260908-203034, A/B repeat step_response-20260908-210020 (observe-confirmed)"
+  },
+  "step-lin-K15-vg03": {
+    "stiffness": 15,
+    "vel_gain": 0.03,
+    "vel_limit": 1.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "[recorded at encoder_bandwidth 100 \u2014 superseded by pos-bw300-* presets] Post-rework (2026-09-08): K=15 clean at vel_gain 0.03 (pos_gain [55,49]): overshoot 0, ripple 0.12 mm decaying (0.09), ss error 1.5 mm, peak 0.28 A. Same K at vel_gain 0.05 limit-cycles at ~12 Hz at any cap -> keep vel_gain <= 0.03 on this arm and build stiffness with pos_gain. Also clamp-dependent: vel_limit 5 rad/s -> 10 Hz limit cycle (step_response-20260908-205514).",
+    "verified": "2026-09-08 step_response-20260908-204316 (observe-confirmed)"
+  },
+  "hand-K100-vg03": {
+    "stiffness": 100,
+    "vel_gain": 0.03,
+    "vel_limit": 1.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "[recorded at encoder_bandwidth 100 \u2014 superseded by pos-bw300-* presets] IN-USE ONLY (hand on the handle). 2026-09-08 hand-on ladder: K=25/50/100 all clean (ripple 0.16 mm at the hand's 1.7 Hz, ss error 1.1-1.5 mm, peak <0.5 A) where free-air K>=15 limit-cycles at 10-13 Hz. Releasing the handle at this K will ring; pair with the oscillation guard / a release detector that drops to step-lin-K10.",
+    "verified": "2026-09-08 step_response-20260908-211519 (K25), -211609 (K50), -211645 (K100)"
+  },
+  "pos-bw300-K100": {
+    "stiffness": 100,
+    "vel_gain": 0.05,
+    "vel_limit": 5.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 500,
+    "notes": "OPERATING POINT OF RECORD after the 2026-09-08 root cause (encoder_bandwidth 300 saved on both drives; 100 added 40-85 deg of velocity-estimate lag at 10-20 Hz). 5 mm step: overshoot 0.44 mm, settles 69 ms, ss error 0.13 mm. K=50 and K=200 also converge (K=200: overshoot 0.63 mm). 25 mm box at 10-25 mm/s: RMS 2.8 mm, limited by shoulder harness stiffness (shoulder at 0.72 A RMS), elbow clean.",
+    "verified": "2026-09-08 step_response-20260908-225426 (K100), -225341 (K50), -225511 (K200); trace_shape-20260908-225619/-225703"
+  }
+}
