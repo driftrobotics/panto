@@ -102,9 +102,9 @@ BO_ 20 Axis0_Get_Iq: 8 ODrive_Axis0
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 21 Axis0_Get_Sensorless_Estimates: 8 ODrive_Axis0
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 21 Axis0_Get_Temperature: 8 ODrive_Axis0
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 22 Axis0_Reboot: 0 Master
 
@@ -196,9 +196,9 @@ BO_ 52 Axis1_Get_Iq: 8 ODrive_Axis1
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 53 Axis1_Get_Sensorless_Estimates: 8 ODrive_Axis1
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 53 Axis1_Get_Temperature: 8 ODrive_Axis1
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 54 Axis1_Reboot: 0 Master
 
@@ -290,9 +290,9 @@ BO_ 84 Axis2_Get_Iq: 8 ODrive_Axis2
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 85 Axis2_Get_Sensorless_Estimates: 8 ODrive_Axis2
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 85 Axis2_Get_Temperature: 8 ODrive_Axis2
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 86 Axis2_Reboot: 0 Master
 
@@ -384,9 +384,9 @@ BO_ 116 Axis3_Get_Iq: 8 ODrive_Axis3
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 117 Axis3_Get_Sensorless_Estimates: 8 ODrive_Axis3
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 117 Axis3_Get_Temperature: 8 ODrive_Axis3
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 118 Axis3_Reboot: 0 Master
 
@@ -478,9 +478,9 @@ BO_ 148 Axis4_Get_Iq: 8 ODrive_Axis4
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 149 Axis4_Get_Sensorless_Estimates: 8 ODrive_Axis4
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 149 Axis4_Get_Temperature: 8 ODrive_Axis4
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 150 Axis4_Reboot: 0 Master
 
@@ -572,9 +572,9 @@ BO_ 180 Axis5_Get_Iq: 8 ODrive_Axis5
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 181 Axis5_Get_Sensorless_Estimates: 8 ODrive_Axis5
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 181 Axis5_Get_Temperature: 8 ODrive_Axis5
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 182 Axis5_Reboot: 0 Master
 
@@ -666,9 +666,9 @@ BO_ 212 Axis6_Get_Iq: 8 ODrive_Axis6
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 213 Axis6_Get_Sensorless_Estimates: 8 ODrive_Axis6
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 213 Axis6_Get_Temperature: 8 ODrive_Axis6
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 214 Axis6_Reboot: 0 Master
 
@@ -760,9 +760,9 @@ BO_ 244 Axis7_Get_Iq: 8 ODrive_Axis7
  SG_ Iq_Measured : 32|32@1+ (1,0) [0|0] "A"  Master
  SG_ Iq_Setpoint : 0|32@1+ (1,0) [0|0] "A"  Master
 
-BO_ 245 Axis7_Get_Sensorless_Estimates: 8 ODrive_Axis7
- SG_ Sensorless_Vel_Estimate : 32|32@1+ (1,0) [0|0] "rev/s"  Master
- SG_ Sensorless_Pos_Estimate : 0|32@1+ (1,0) [0|0] "rev"  Master
+BO_ 245 Axis7_Get_Temperature: 8 ODrive_Axis7
+ SG_ Motor_Temperature : 32|32@1+ (1,0) [0|0] "degC"  Master
+ SG_ FET_Temperature : 0|32@1+ (1,0) [0|0] "degC"  Master
 
 BO_ 246 Axis7_Reboot: 0 Master
 
@@ -896,8 +896,8 @@ SIG_VALTYPE_ 18 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 19 Traj_Inertia : 1;
 SIG_VALTYPE_ 20 Iq_Setpoint : 1;
 SIG_VALTYPE_ 20 Iq_Measured : 1;
-SIG_VALTYPE_ 21 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 21 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 21 FET_Temperature : 1;
+SIG_VALTYPE_ 21 Motor_Temperature : 1;
 SIG_VALTYPE_ 23 Bus_Voltage : 1;
 SIG_VALTYPE_ 23 Bus_Current : 1;
 SIG_VALTYPE_ 26 Pos_Gain : 1;
@@ -918,8 +918,8 @@ SIG_VALTYPE_ 50 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 51 Traj_Inertia : 1;
 SIG_VALTYPE_ 52 Iq_Setpoint : 1;
 SIG_VALTYPE_ 52 Iq_Measured : 1;
-SIG_VALTYPE_ 53 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 53 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 53 FET_Temperature : 1;
+SIG_VALTYPE_ 53 Motor_Temperature : 1;
 SIG_VALTYPE_ 55 Bus_Voltage : 1;
 SIG_VALTYPE_ 55 Bus_Current : 1;
 SIG_VALTYPE_ 58 Pos_Gain : 1;
@@ -940,8 +940,8 @@ SIG_VALTYPE_ 82 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 83 Traj_Inertia : 1;
 SIG_VALTYPE_ 84 Iq_Setpoint : 1;
 SIG_VALTYPE_ 84 Iq_Measured : 1;
-SIG_VALTYPE_ 85 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 85 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 85 FET_Temperature : 1;
+SIG_VALTYPE_ 85 Motor_Temperature : 1;
 SIG_VALTYPE_ 87 Bus_Voltage : 1;
 SIG_VALTYPE_ 87 Bus_Current : 1;
 SIG_VALTYPE_ 90 Pos_Gain : 1;
@@ -962,8 +962,8 @@ SIG_VALTYPE_ 114 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 115 Traj_Inertia : 1;
 SIG_VALTYPE_ 116 Iq_Setpoint : 1;
 SIG_VALTYPE_ 116 Iq_Measured : 1;
-SIG_VALTYPE_ 117 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 117 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 117 FET_Temperature : 1;
+SIG_VALTYPE_ 117 Motor_Temperature : 1;
 SIG_VALTYPE_ 119 Bus_Voltage : 1;
 SIG_VALTYPE_ 119 Bus_Current : 1;
 SIG_VALTYPE_ 122 Pos_Gain : 1;
@@ -984,8 +984,8 @@ SIG_VALTYPE_ 146 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 147 Traj_Inertia : 1;
 SIG_VALTYPE_ 148 Iq_Setpoint : 1;
 SIG_VALTYPE_ 148 Iq_Measured : 1;
-SIG_VALTYPE_ 149 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 149 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 149 FET_Temperature : 1;
+SIG_VALTYPE_ 149 Motor_Temperature : 1;
 SIG_VALTYPE_ 151 Bus_Voltage : 1;
 SIG_VALTYPE_ 151 Bus_Current : 1;
 SIG_VALTYPE_ 154 Pos_Gain : 1;
@@ -1006,8 +1006,8 @@ SIG_VALTYPE_ 178 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 179 Traj_Inertia : 1;
 SIG_VALTYPE_ 180 Iq_Setpoint : 1;
 SIG_VALTYPE_ 180 Iq_Measured : 1;
-SIG_VALTYPE_ 181 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 181 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 181 FET_Temperature : 1;
+SIG_VALTYPE_ 181 Motor_Temperature : 1;
 SIG_VALTYPE_ 183 Bus_Voltage : 1;
 SIG_VALTYPE_ 183 Bus_Current : 1;
 SIG_VALTYPE_ 186 Pos_Gain : 1;
@@ -1028,8 +1028,8 @@ SIG_VALTYPE_ 210 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 211 Traj_Inertia : 1;
 SIG_VALTYPE_ 212 Iq_Setpoint : 1;
 SIG_VALTYPE_ 212 Iq_Measured : 1;
-SIG_VALTYPE_ 213 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 213 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 213 FET_Temperature : 1;
+SIG_VALTYPE_ 213 Motor_Temperature : 1;
 SIG_VALTYPE_ 215 Bus_Voltage : 1;
 SIG_VALTYPE_ 215 Bus_Current : 1;
 SIG_VALTYPE_ 218 Pos_Gain : 1;
@@ -1050,8 +1050,8 @@ SIG_VALTYPE_ 242 Traj_Decel_Limit : 1;
 SIG_VALTYPE_ 243 Traj_Inertia : 1;
 SIG_VALTYPE_ 244 Iq_Setpoint : 1;
 SIG_VALTYPE_ 244 Iq_Measured : 1;
-SIG_VALTYPE_ 245 Sensorless_Pos_Estimate : 1;
-SIG_VALTYPE_ 245 Sensorless_Vel_Estimate : 1;
+SIG_VALTYPE_ 245 FET_Temperature : 1;
+SIG_VALTYPE_ 245 Motor_Temperature : 1;
 SIG_VALTYPE_ 247 Bus_Voltage : 1;
 SIG_VALTYPE_ 247 Bus_Current : 1;
 SIG_VALTYPE_ 250 Pos_Gain : 1;

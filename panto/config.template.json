@@ -1,11 +1,11 @@
 {
   "geo": { "l1": 0.125, "l2": 0.125 },
   "motors": [
-    { "node_id": 0, "flip": false, "zero_offset_rad": 0.0,
-      "torque_constant": 0.035, "current_soft_max": 0.8,
+    { "node_id": 0, "flip": true, "zero_offset_rad": 0.0,
+      "torque_constant": 0.02235, "current_soft_max": 0.8,
       "vel_gain": 0.0025, "vel_integrator_gain": 0.0, "max_pos_gain": 500.0 },
-    { "node_id": 1, "flip": true, "zero_offset_rad": 0.0,
-      "torque_constant": 0.035, "current_soft_max": 0.8,
+    { "node_id": 1, "flip": false, "zero_offset_rad": 0.0,
+      "torque_constant": 0.02235, "current_soft_max": 0.8,
       "vel_gain": 0.0025, "vel_integrator_gain": 0.0, "max_pos_gain": 500.0 }
   ],
   "thermal": { "i_continuous": 0.2, "budget_a2s": 4.0 },

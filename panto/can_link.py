@@ -26,6 +26,7 @@ turn unit change applies to `vel_limit`).
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -35,7 +36,11 @@ import can
 import cantools
 import numpy as np
 
+from .limits import check_armable, has_limits
+
 TWO_PI = 2.0 * np.pi
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DBC = Path(__file__).resolve().parent.parent / "dbc" / "odrive-cansimple-0.6.x.dbc"
 
@@ -55,6 +60,8 @@ CMD = {
     "Set_Input_Torque": 0x00E,
     "Set_Limits": 0x00F,
     "Get_Iq": 0x014,
+    "Get_Temperature": 0x015,
+    "Get_Bus_Voltage_Current": 0x017,
     "Clear_Errors": 0x018,
     "Set_Pos_Gain": 0x01A,
     "Set_Vel_Gains": 0x01B,
@@ -83,6 +90,52 @@ CONTROL_MODE_POSITION = 3
 INPUT_MODE_PASSTHROUGH = 1
 
 _MODE_TO_CONTROL = {"position": CONTROL_MODE_POSITION, "torque": CONTROL_MODE_TORQUE}
+
+#: ODrive Axis_Error / disarm_reason bit -> name (Firmware/odrive/interfaces/odrive/errors.hpp,
+#: ODriveError). One node's disarm_reason is normally a single bit, but this is a bitmask by
+#: protocol, so decode_error_flags() below reports every bit set, not just the first.
+ODRIVE_ERROR_NAMES: dict[int, str] = {
+    0x1: "INITIALIZING",
+    0x2: "SYSTEM_LEVEL",
+    0x4: "TIMING_ERROR",
+    0x8: "MISSING_ESTIMATE",
+    0x10: "BAD_CONFIG",
+    0x20: "DRV_FAULT",
+    0x40: "MISSING_INPUT",
+    0x100: "DC_BUS_OVER_VOLTAGE",
+    0x200: "DC_BUS_UNDER_VOLTAGE",
+    0x400: "DC_BUS_OVER_CURRENT",
+    0x800: "DC_BUS_OVER_REGEN_CURRENT",
+    0x1000: "CURRENT_LIMIT_VIOLATION",
+    0x2000: "MOTOR_OVER_TEMP",
+    0x4000: "INVERTER_OVER_TEMP",
+    0x8000: "VELOCITY_LIMIT_VIOLATION",
+    0x10000: "POSITION_LIMIT_VIOLATION",
+    0x20000: "REQUESTED_CURRENT_TOO_HIGH",
+    0x1000000: "WATCHDOG_TIMER_EXPIRED",
+    0x2000000: "ESTOP_REQUESTED",
+    0x4000000: "SPINOUT_DETECTED",
+    0x8000000: "BRAKE_RESISTOR_DISARMED",
+    0x10000000: "THERMISTOR_DISCONNECTED",
+    0x40000000: "CALIBRATION_ERROR",
+}
+
+
+def decode_error_flags(bits: int) -> str:
+    """0x400 -> "DC_BUS_OVER_CURRENT"; multiple bits joined with '|'; 0 ->
+    "NONE"; any unrecognised bit reported as its own hex literal rather than
+    silently dropped."""
+    if not bits:
+        return "NONE"
+    names = []
+    remaining = bits
+    for bit, name in ODRIVE_ERROR_NAMES.items():
+        if bits & bit:
+            names.append(name)
+            remaining &= ~bit
+    if remaining:
+        names.append(hex(remaining))
+    return "|".join(names) if names else hex(bits)
 
 
 class CanLinkError(RuntimeError):
@@ -115,6 +168,47 @@ def motor_torque_from_joint(tau_nm: float, flip: bool) -> float:
     return (-1.0 if flip else 1.0) * tau_nm
 
 
+def decide_wrap_turns(
+    raw_turns: float, flip: bool, zero_offset_rad: float,
+    q_min_rad: float, q_max_rad: float, limit_margin_rad: float,
+    *, search: int = 3,
+) -> int:
+    """Pick the integer whole-turn fold ``k`` such that
+    ``joint_from_turns(raw_turns + k, flip, zero_offset_rad)`` lands inside
+    ``[q_min - margin, q_max + margin]`` (the ODrive's multi-turn position can
+    boot a full turn off if the joint was parked near the 12-bit
+    single-turn absolute encoder's wrap point at power-up -- see can_link.py
+    module docstring). If several ``k`` land inside, prefer the smallest
+    magnitude (i.e. no fold, if the reading is already sane). If none do
+    (limits configured but the reading is nowhere close -- e.g. limits not
+    yet calibrated for this pose), pick whichever ``k`` lands closest to the
+    range centre, so the frame is at least self-consistent.
+
+    Returns 0 (no fold) if the motor has no finite limit configured.
+    """
+    if q_min_rad == float("-inf") and q_max_rad == float("inf"):
+        return 0
+    lo = q_min_rad - limit_margin_rad
+    hi = q_max_rad + limit_margin_rad
+    in_range = []
+    for k in range(-search, search + 1):
+        q = joint_from_turns(raw_turns + k, flip, zero_offset_rad)
+        if lo <= q <= hi:
+            in_range.append(k)
+    if in_range:
+        return min(in_range, key=abs)
+    finite_lo = q_min_rad if q_min_rad > float("-inf") else q_max_rad - 1.0
+    finite_hi = q_max_rad if q_max_rad < float("inf") else q_min_rad + 1.0
+    centre = 0.5 * (finite_lo + finite_hi)
+    best_k, best_dist = 0, float("inf")
+    for k in range(-search, search + 1):
+        q = joint_from_turns(raw_turns + k, flip, zero_offset_rad)
+        dist = abs(q - centre)
+        if dist < best_dist:
+            best_dist, best_k = dist, k
+    return best_k
+
+
 @dataclass
 class Feedback:
     """Latest cyclic feedback for one axis (raw motor frame)."""
@@ -122,14 +216,20 @@ class Feedback:
     pos_turns: float = 0.0
     vel_turns_s: float = 0.0
     iq_measured: float = 0.0
+    vbus: float = 0.0
+    ibus: float = 0.0
+    fet_temp_c: float = 0.0
+    motor_temp_c: float = 0.0
     enc_stamp: float | None = None       # monotonic time of last encoder frame
     iq_stamp: float | None = None
+    bus_stamp: float | None = None       # None until first Get_Bus_Voltage_Current frame
+    temp_stamp: float | None = None      # None until first Get_Temperature frame
     axis_state: int = 0
     axis_error: int = 0             # Heartbeat's Axis_Error: active | disarm, combined
     active_errors: int = 0          # Get_Error.Active_Errors: wrong *right now*
     disarm_reason: int = 0          # Get_Error.Disarm_Reason: latched, why it dropped to IDLE
     heartbeat_stamp: float | None = None
-    error_stamp: float | None = None
+    error_stamp: float | None = None     # None until first Get_Error frame decoded
 
 
 @dataclass(frozen=True)
@@ -141,13 +241,20 @@ class NodeStatus:
     kept for backward compat with :meth:`CanLink.axis_errors`. A node can be
     IDLE with ``active_errors == 0`` and a non-zero ``disarm_reason`` — that's a
     past protective trip, not an ongoing fault (see dbc/README.md).
+
+    ``active_errors`` / ``disarm_reason`` are ``None`` (unknown) until the first
+    ``Get_Error`` frame for that node has been decoded — Heartbeat (~100 Hz)
+    reliably arrives well before the first ``Get_Error`` (~10 Hz), so treating a
+    still-default 0 as "no error" would report a false all-clear, and treating
+    the first real (possibly latched-nonzero) frame as a "transition" from that
+    default would fabricate a fault event that never happened.
     """
 
     node_id: int
     axis_state: int
     axis_error: int
-    active_errors: int
-    disarm_reason: int
+    active_errors: int | None
+    disarm_reason: int | None
     age_s: float
 
 
@@ -183,6 +290,13 @@ class CanLink:
 
         self._validate_dbc(dbc_path)
 
+        # encoder wrap fold, per node index: 0 unless the motor has finite
+        # joint limits, decided once from the first feedback frame and held
+        # constant for the session (see decide_wrap_turns). Reads add it,
+        # writes subtract it -- see set_input_pos.
+        self._wrap_turns = [0, 0]
+        self._wrap_decided = [False, False]
+
         self._feedback = [Feedback(), Feedback()]
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -208,6 +322,8 @@ class CanLink:
             self._rx_map[self._frame_id(nid, "Heartbeat")] = (i, "heartbeat")
             self._rx_map[self._frame_id(nid, "Get_Iq")] = (i, "iq")
             self._rx_map[self._frame_id(nid, "Get_Error")] = (i, "error")
+            self._rx_map[self._frame_id(nid, "Get_Bus_Voltage_Current")] = (i, "bus")
+            self._rx_map[self._frame_id(nid, "Get_Temperature")] = (i, "temp")
 
     # ------------------------------------------------------------------ dbc
 
@@ -290,19 +406,33 @@ class CanLink:
             int(getattr(self._config, "can_bitrate", 1_000_000)),
         )
 
-    def wait_for_feedback(self, timeout: float = 5.0) -> None:
+    def wait_for_feedback(self, timeout: float = 5.0, wait_for_errors: bool = False) -> None:
+        """Block until both axes have sent their first cyclic feedback.
+
+        By default only waits for ``Get_Encoder_Estimates`` (as before). Pass
+        ``wait_for_errors=True`` to also wait for the first ``Get_Error`` frame
+        per node, so ``node_status()``'s ``active_errors``/``disarm_reason`` are
+        known (not ``None``) by the time this returns — use it before logging
+        or checking initial error state so a real latched fault isn't mistaken
+        for a fresh transition once the first frame arrives.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
-                if all(fb.enc_stamp is not None for fb in self._feedback):
-                    return
+                ok = all(fb.enc_stamp is not None for fb in self._feedback)
+                if wait_for_errors:
+                    ok = ok and all(fb.error_stamp is not None for fb in self._feedback)
+            if ok:
+                return
             time.sleep(0.01)
+        missing = "Get_Encoder_Estimates" + (" / Get_Error" if wait_for_errors else "")
         raise CanLinkError(
-            f"no Get_Encoder_Estimates from nodes {self._node_ids} within {timeout}s. "
+            f"no {missing} from nodes {self._node_ids} within {timeout}s. "
             "Check node ids, bitrate, bus termination, and encoder_msg_rate_ms != 0."
         )
 
     def enter_closed_loop(self, timeout: float = 5.0) -> None:
+        self._check_arm_limits()
         for nid in self._node_ids:
             self._send(nid, "Set_Axis_State", {"Axis_Requested_State": AXIS_STATE_CLOSED_LOOP_CONTROL})
         deadline = time.monotonic() + timeout
@@ -319,6 +449,21 @@ class CanLink:
             f"axes {self._node_ids} did not reach CLOSED_LOOP_CONTROL "
             f"(states={states}, errors={[hex(e) for e in errs]}). Motor calibrated?"
         )
+
+    def _check_arm_limits(self) -> None:
+        """Refuse to arm (before sending any Set_Axis_State) if a joint with
+        known limits is currently outside its armable range. Called first
+        thing in enter_closed_loop -- no command frame goes out if this
+        raises."""
+        motors = list(self._config.motors)
+        if not any(has_limits(m) for m in motors):
+            return
+        q, _ = self.joint_state()
+        problems = check_armable(q, motors)
+        if problems:
+            raise CanLinkError(
+                "refusing to arm -- joint(s) outside limits: " + "; ".join(problems)
+            )
 
     def stop(self) -> None:
         """Command both axes to IDLE, then tear down. Idempotent."""
@@ -358,6 +503,8 @@ class CanLink:
         hb_msgs = {i: self._msg(nid, "Heartbeat") for nid, i in self._idx.items()}
         iq_msgs = {i: self._msg(nid, "Get_Iq") for nid, i in self._idx.items()}
         err_msgs = {i: self._msg(nid, "Get_Error") for nid, i in self._idx.items()}
+        bus_msgs = {i: self._msg(nid, "Get_Bus_Voltage_Current") for nid, i in self._idx.items()}
+        temp_msgs = {i: self._msg(nid, "Get_Temperature") for nid, i in self._idx.items()}
         while not self._stop.is_set():
             try:
                 frame = self._bus.recv(timeout=0.2)
@@ -375,9 +522,23 @@ class CanLink:
             try:
                 if kind == "encoder":
                     d = enc_msgs[i].decode(frame.data)
+                    raw = float(d["Pos_Estimate"])
                     with self._lock:
+                        if not self._wrap_decided[i]:
+                            motor = self._config.motors[i]
+                            self._wrap_turns[i] = decide_wrap_turns(
+                                raw, self._flip[i], self._zero[i],
+                                motor.q_min_rad, motor.q_max_rad, motor.limit_margin_rad,
+                            )
+                            self._wrap_decided[i] = True
+                            if self._wrap_turns[i] != 0:
+                                log.info(
+                                    "node %d: encoder wrap-folded by %+d turn(s) "
+                                    "(raw=%.4f turns)",
+                                    self._node_ids[i], self._wrap_turns[i], raw,
+                                )
                         fb = self._feedback[i]
-                        fb.pos_turns = float(d["Pos_Estimate"])
+                        fb.pos_turns = raw + self._wrap_turns[i]
                         fb.vel_turns_s = float(d["Vel_Estimate"])
                         fb.enc_stamp = now
                         self._rx_count += 1
@@ -403,6 +564,20 @@ class CanLink:
                         fb.active_errors = as_int(d.get("Active_Errors", 0))
                         fb.disarm_reason = as_int(d.get("Disarm_Reason", 0))
                         fb.error_stamp = now
+                elif kind == "bus":
+                    d = bus_msgs[i].decode(frame.data)
+                    with self._lock:
+                        fb = self._feedback[i]
+                        fb.vbus = float(d["Bus_Voltage"])
+                        fb.ibus = float(d["Bus_Current"])
+                        fb.bus_stamp = now
+                elif kind == "temp":
+                    d = temp_msgs[i].decode(frame.data)
+                    with self._lock:
+                        fb = self._feedback[i]
+                        fb.fet_temp_c = float(d["FET_Temperature"])
+                        fb.motor_temp_c = float(d["Motor_Temperature"])
+                        fb.temp_stamp = now
             except Exception:
                 continue
 
@@ -429,9 +604,39 @@ class CanLink:
             return float("inf")
         return time.monotonic() - max(stamps)
 
+    def feedback_stamps(self) -> tuple[tuple[float | None, float | None], tuple[float | None, float | None]]:
+        """Per-node ``(enc_stamp, iq_stamp)`` monotonic receive times -- the
+        raw ingredients for latency estimation (scripts/sysid.py), which
+        needs each frame's own stamp rather than the cross-node max
+        :meth:`feedback_age_s` reports."""
+        with self._lock:
+            return tuple((fb.enc_stamp, fb.iq_stamp) for fb in self._feedback)  # type: ignore[return-value]
+
     def motor_currents(self) -> np.ndarray:
         with self._lock:
             return np.array([fb.iq_measured for fb in self._feedback])
+
+    def bus_voltage_current(self) -> tuple[np.ndarray, np.ndarray]:
+        """([vbus0, vbus1], [ibus0, ibus1]) from Get_Bus_Voltage_Current --
+        0 for a node until its first such frame has been decoded (not all
+        firmware configs broadcast this message by default; see dbc/README.md
+        before assuming it's flowing)."""
+        with self._lock:
+            vbus = np.array([fb.vbus for fb in self._feedback])
+            ibus = np.array([fb.ibus for fb in self._feedback])
+        return vbus, ibus
+
+    def temperatures(self) -> tuple[np.ndarray, np.ndarray]:
+        """([fet_temp_c0, fet_temp_c1], [motor_temp_c0, motor_temp_c1]) from
+        Get_Temperature. 0 for a node until its first such frame is decoded.
+        Motor_Temperature reads NaN (per firmware, thermistor disconnected)
+        wherever `motor.motor_thermistor.config.enabled` is False on that
+        drive -- confirmed False on both panto drives as of 2026-09-04, so
+        expect NaN/0 there, not a decode bug."""
+        with self._lock:
+            fet = np.array([fb.fet_temp_c for fb in self._feedback])
+            motor = np.array([fb.motor_temp_c for fb in self._feedback])
+        return fet, motor
 
     def axis_errors(self) -> tuple[int, int]:
         with self._lock:
@@ -450,12 +655,13 @@ class CanLink:
             for nid in self._node_ids:
                 fb = self._feedback[self._idx[nid]]
                 age = now - fb.heartbeat_stamp if fb.heartbeat_stamp is not None else float("inf")
+                errors_known = fb.error_stamp is not None
                 out.append(NodeStatus(
                     node_id=nid,
                     axis_state=fb.axis_state,
                     axis_error=fb.axis_error,
-                    active_errors=fb.active_errors,
-                    disarm_reason=fb.disarm_reason,
+                    active_errors=fb.active_errors if errors_known else None,
+                    disarm_reason=fb.disarm_reason if errors_known else None,
                     age_s=age,
                 ))
         return tuple(out)  # type: ignore[return-value]
@@ -463,6 +669,14 @@ class CanLink:
     def counters(self) -> tuple[int, int]:
         with self._lock:
             return self._tx_count, self._rx_count
+
+    def wrap_turns(self) -> tuple[int, int]:
+        """Encoder wrap fold decided from each node's first read this session
+        (see decide_wrap_turns) -- 0 means the raw single-turn reading needed
+        no fold to land in range. Pre-flight scripts print this so a nonzero
+        value (an unexpected fold) is visible before arming."""
+        with self._lock:
+            return tuple(self._wrap_turns)  # type: ignore[return-value]
 
     # ------------------------------------------------------------------ writes
 
@@ -476,11 +690,23 @@ class CanLink:
             "Input_Mode": INPUT_MODE_PASSTHROUGH,
         })
 
-    def set_input_pos(self, node_id: int, q_rad: float) -> None:
+    def set_input_pos(self, node_id: int, q_rad: float, torque_ff_nm: float = 0.0) -> None:
         i = self._idx[node_id]
-        pos_turns = turns_from_joint(q_rad, self._flip[i], self._zero[i])
+        # Same fold decided from the first read (self._wrap_turns) must be
+        # applied to writes too: the drive's Input_Pos lives in *its own*
+        # multi-turn frame (what it reports as Pos_Estimate), not the folded
+        # frame we hand out through joint_state(). Applying the read-side fold
+        # without undoing it here would command a full extra turn of motion.
+        pos_turns = turns_from_joint(q_rad, self._flip[i], self._zero[i]) - self._wrap_turns[i]
+        # Torque_FF is int16 @ 0.001 N.m/LSB (dbc/odrive-cansimple-0.6.x.dbc) --
+        # joint-frame torque_ff_nm goes through the same flip convention as
+        # Set_Input_Torque (motor_torque_from_joint), then gets clamped to the
+        # signal's +-32.767 N.m range (way above anything this rig commands;
+        # the clamp is just to avoid a cantools encode error on a bad input).
+        motor_ff = motor_torque_from_joint(torque_ff_nm, self._flip[i])
+        motor_ff = max(-32.767, min(32.767, motor_ff))
         self._send(node_id, "Set_Input_Pos", {
-            "Input_Pos": pos_turns, "Vel_FF": 0.0, "Torque_FF": 0.0,
+            "Input_Pos": pos_turns, "Vel_FF": 0.0, "Torque_FF": motor_ff,
         })
 
     def set_pos_gain(self, node_id: int, gain: float) -> None:
@@ -504,6 +730,11 @@ class CanLink:
             "Velocity_Limit": vel_turns_s, "Current_Limit": current_limit,
         })
         self._last_limits[node_id] = key
+
+    def set_vel_gains(self, node_id: int, vel_gain: float, vel_integrator_gain: float = 0.0) -> None:
+        self._send(node_id, "Set_Vel_Gains", {
+            "Vel_Gain": vel_gain, "Vel_Integrator_Gain": vel_integrator_gain,
+        })
 
     def set_idle(self, node_id: int) -> None:
         self._send(node_id, "Set_Axis_State", {"Axis_Requested_State": AXIS_STATE_IDLE})

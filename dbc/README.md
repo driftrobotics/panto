@@ -47,7 +47,19 @@ introduced this file: `VERSION` string; the 4 flag-bit `SG_` lines in each
 `BO_ ... Get_Motor_Error` → `Get_Error` with `SG_ Motor_Error : 0|32` →
 `Active_Errors : 0|32` + `Disarm_Reason : 32|32`.
 
-## Messages panto uses — all byte-compatible 0.5.6 ↔ 0.6.x except the two above
+**`Get_Sensorless_Estimates` (0x015/0x035, third patch, 2026-09-04):** 0.5.6's
+`Get_Sensorless_Estimates` (`Sensorless_Pos_Estimate` bytes 0–3,
+`Sensorless_Vel_Estimate` bytes 4–7) is reused by 0.6.x firmware for
+`Get_Temperature` (`FET_Temperature` bytes 0–3, `Motor_Temperature` bytes
+4–7) — same cmd ids, same byte layout (both float32 LE), only the message and
+signal names changed. Renamed for all 8 axis copies; `CanLink` now decodes
+`FET_Temperature`/`Motor_Temperature` from it (`scripts/torque_step.py`'s
+thermal reporting). The motor thermistor is disabled on both panto drives
+(`motor.motor_thermistor.config.enabled = False`, confirmed 2026-09-04 during
+the breakaway-torque investigation) so `Motor_Temperature` reads NaN/0 — that
+is expected, not a decode bug.
+
+## Messages panto uses — all byte-compatible 0.5.6 ↔ 0.6.x except the three above
 
 | cmd id | message | note |
 |---|---|---|
@@ -58,6 +70,8 @@ introduced this file: `VERSION` string; the 4 flag-bit `SG_` lines in each
 | 0x00B | `Set_Controller_Mode` | unchanged (`Control_Mode`, `Input_Mode`) |
 | 0x00C | `Set_Input_Pos` | unchanged; `Vel_FF`/`Torque_FF` int16·1e-3 |
 | 0x00E | `Set_Input_Torque` | unchanged |
+| 0x015 | `Get_Temperature` | patched, see above; we read `FET_Temperature`, `Motor_Temperature` |
+| 0x017 | `Get_Bus_Voltage_Current` | unchanged (`Bus_Voltage` V, `Bus_Current` A) |
 | 0x00F | `Set_Limits` | unchanged (`Velocity_Limit` rev/s, `Current_Limit` A) |
 | 0x014 | `Get_Iq` | unchanged (`Iq_Measured`, A) — our current source for I²t |
 | 0x018 | `Clear_Errors` | unchanged (empty payload) |
@@ -66,9 +80,9 @@ introduced this file: `VERSION` string; the 4 flag-bit `SG_` lines in each
 
 0.6.x changes panto does **not** use (left as their stale 0.5.6 definitions):
 `Get_Encoder_Error`/`Get_Sensorless_Error` (folded into `Get_Error` upstream,
-we don't decode the old per-subsystem ones), `Get_Sensorless_Estimates` (0x015)
-→ `Get_Temperature` (`FET_Temperature` + `Motor_Temperature`), new
-`Get_Torques`/`Get_Powers`.
+we don't decode the old per-subsystem ones), new `Get_Torques`/`Get_Powers`.
+(`Get_Sensorless_Estimates` → `Get_Temperature`, 0x015, is now patched and
+used -- see above.)
 
 ## Addressing
 

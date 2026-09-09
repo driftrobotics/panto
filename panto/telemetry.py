@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .can_link import decode_error_flags
+
 LOG_ROOT = Path(__file__).resolve().parent.parent / "logs"
 
 
@@ -113,21 +115,49 @@ class RunLogger:
             "disarm_reason": status.disarm_reason,
         }
         self._last_status[nid] = cur
+
+        # active_errors/disarm_reason are None until the first Get_Error frame
+        # for this node has been decoded (Heartbeat arrives first, ~100 Hz vs.
+        # ~10 Hz). Don't compare against that unknown default -- it isn't "0",
+        # and treating it as such fabricates a fake transition the instant the
+        # real (possibly already-latched) value shows up.
+        prev_errors_known = prev is not None and prev["active_errors"] is not None
+        cur_errors_known = cur["active_errors"] is not None
+
         if prev is None:
-            self.event(f"node {nid}: initial status {cur}")
+            axis_state_part = f"axis_state={cur['axis_state']}"
+            if cur_errors_known:
+                self.event(
+                    f"node {nid}: initial status {axis_state_part} "
+                    f"active_errors=0x{cur['active_errors']:x} "
+                    f"disarm_reason=0x{cur['disarm_reason']:x}"
+                )
+            else:
+                self.event(f"node {nid}: initial status {axis_state_part} errors=unknown")
             return
+
         if cur["axis_state"] != prev["axis_state"]:
             self.event(f"node {nid}: axis_state {prev['axis_state']} -> {cur['axis_state']}")
-        if cur["active_errors"] != prev["active_errors"]:
-            level = "WARN" if cur["active_errors"] else "INFO"
+
+        if not prev_errors_known and cur_errors_known:
+            # First Get_Error frame just arrived -- report what it says, but as
+            # new information, not as a transition from a fabricated 0.
+            latched = " (latched)" if cur["disarm_reason"] else ""
             self.event(
-                f"node {nid}: active_errors 0x{prev['active_errors']:x} -> "
-                f"0x{cur['active_errors']:x}",
-                level=level,
+                f"node {nid}: initial errors active=0x{cur['active_errors']:x} "
+                f"disarm=0x{cur['disarm_reason']:x}{latched}"
             )
-        if cur["disarm_reason"] != prev["disarm_reason"]:
-            self.event(
-                f"node {nid}: disarm_reason 0x{prev['disarm_reason']:x} -> "
-                f"0x{cur['disarm_reason']:x}",
-                level="WARN",
-            )
+        elif prev_errors_known and cur_errors_known:
+            if cur["active_errors"] != prev["active_errors"]:
+                level = "WARN" if cur["active_errors"] else "INFO"
+                self.event(
+                    f"node {nid}: active_errors 0x{prev['active_errors']:x} -> "
+                    f"0x{cur['active_errors']:x} ({decode_error_flags(cur['active_errors'])})",
+                    level=level,
+                )
+            if cur["disarm_reason"] != prev["disarm_reason"]:
+                self.event(
+                    f"node {nid}: disarm_reason 0x{prev['disarm_reason']:x} -> "
+                    f"0x{cur['disarm_reason']:x} ({decode_error_flags(cur['disarm_reason'])})",
+                    level="WARN",
+                )

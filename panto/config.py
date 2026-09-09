@@ -61,6 +61,40 @@ class MotorConfig:
     max_pos_gain: float = 500.0        # clamp on derived pos_gain, (turn/s)/turn
     vel_limit: float = 20.0            # ODrive turn/s runaway guard (backend uses)
 
+    # --- velocity-scheduled current cap (host-side soft saturation), 2026-09-04
+    # relay-oscillation fix: at the current cap, the position cascade is
+    # bang-bang (torque = vel_gain*clamp(pos_gain*err, +-vel_limit) then
+    # current-capped) with no damping once saturated -- an undamped ~10-14Hz
+    # relay whose amplitude scales with the cap. Scheduling the cap down as
+    # |qd| grows lets it act like a physical current limit during the fast
+    # part of the swing (where saturation happens) while still allowing the
+    # full cap_max near zero velocity (holding stiffness). Off by default
+    # (slope 0 -> constant current_soft_max, today's behaviour).
+    cap_vel_slope_a_per_rad_s: float = 0.0   # k_v: cap_max -> cap_min per rad/s of |qd|
+    cap_min_a: float = 0.5                   # floor the schedule never drops below, PER MOTOR
+                                              # (shoulder/elbow have very different breakaway --
+                                              # a shared floor either starves the shoulder or
+                                              # over-currents the elbow)
+
+    # --- Coulomb friction feedforward (2026-09-04 breakaway-informed), sent via
+    # Set_Input_Pos's Torque_FF signal (see can_link.set_input_pos). Off by
+    # default (0 N.m -> tau_ff always 0, byte-identical to pre-feedforward
+    # behaviour). Values are joint-frame breakaway torque, N.m, for +/- motion
+    # (measured asymmetric per direction -- see calibration.json's
+    # "coulomb_pos_nm"/"coulomb_neg_nm" per motor and the breakaway note in
+    # panto-hardware memory). ff_scale is a knob to under-drive the measured
+    # breakaway (1.0 = feed forward the full measured value; 0 disables).
+    coulomb_pos_nm: float = 0.0        # breakaway torque, +q direction, N.m
+    coulomb_neg_nm: float = 0.0        # breakaway torque, -q direction, N.m (positive magnitude)
+    ff_scale: float = 0.7
+
+    # --- joint travel limits (2026-09-04: hit a mechanical stop with none
+    # configured). Defaults are "unknown, no limiting" -- unset until
+    # calibration.json supplies real values for this arm. ---
+    q_min_rad: float = float("-inf")   # joint angle at the low mechanical stop
+    q_max_rad: float = float("inf")    # joint angle at the high mechanical stop
+    limit_margin_rad: float = 0.087    # ~5 deg keep-out inside [q_min, q_max]
+
 
 @dataclass
 class ThermalConfig:
@@ -82,6 +116,29 @@ class CanConfig:
 
 
 @dataclass
+class TestPose:
+    """A known-good, hand-verified bring-up pose, set once by the operator
+    parking the arm and captured into calibration.json under the ``test_pose``
+    key (this module never writes it). ``tip_xy_mm`` is the FK-consistent
+    Cartesian check value, ``q_deg`` the joint angles at that pose -- both are
+    stored so scripts can sanity-check FK/IK agreement against a physically
+    verified reference, not just against themselves.
+
+    2026-09-04: a run centred each new invocation on wherever the *previous*
+    run's arm ended up (``--centre-here``); every failed direction left the
+    elbow a little more folded, so repeated runs walked the arm toward the
+    fold limit / cable harness without any single run's excursion check
+    catching it (each excursion was measured from that run's own drifted
+    start, not a fixed reference). ``test_pose`` is the fixed reference now:
+    offset_sweep's default centre, and the point every run returns to before
+    IDLE, so drift can't accumulate across invocations.
+    """
+
+    tip_xy_mm: tuple[float, float] = (0.0, 0.0)
+    q_deg: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass
 class ControlConfig:
     rate_hz: float = 200.0
     latency_compensation_s: float = 0.0   # cap on feedback-age pose extrapolation
@@ -95,7 +152,10 @@ class ControlConfig:
 class Config:
     geo: LinkGeometry = field(default_factory=LinkGeometry.panto_v0)
     motors: tuple[MotorConfig, MotorConfig] = field(
-        default_factory=lambda: (MotorConfig(0), MotorConfig(1, flip=True))
+        default_factory=lambda: (
+            MotorConfig(0, flip=True, torque_constant=0.02235),
+            MotorConfig(1, flip=False, torque_constant=0.02235),
+        )
     )
     thermal: ThermalConfig = field(default_factory=ThermalConfig)
     can: CanConfig = field(default_factory=CanConfig)
@@ -105,6 +165,9 @@ class Config:
     sigma_min_threshold: float = 0.03
     heartbeat_timeout_s: float = 5.0
     workspace_polygon: np.ndarray | None = None
+    #: hand-verified bring-up reference pose; None until calibration.json sets
+    #: it (never written here -- see TestPose docstring).
+    test_pose: TestPose | None = None
 
     # ---------------------------------------------------------- flat aliases
     # Kept so A/B/C keep importing the names they already use.
@@ -147,6 +210,35 @@ class Config:
             for m, off in zip(self.motors, v):
                 m.zero_offset_rad = float(off)
 
+    @property
+    def q_min_rad(self) -> np.ndarray:
+        """[q1, q2] lower joint limits, per-motor. -inf where unknown."""
+        return np.array([m.q_min_rad for m in self.motors], dtype=float)
+
+    @property
+    def q_max_rad(self) -> np.ndarray:
+        """[q1, q2] upper joint limits, per-motor. +inf where unknown."""
+        return np.array([m.q_max_rad for m in self.motors], dtype=float)
+
+    @property
+    def limit_margin_rad(self) -> np.ndarray:
+        """[q1, q2] keep-out margin inside [q_min, q_max], per-motor."""
+        return np.array([m.limit_margin_rad for m in self.motors], dtype=float)
+
+    @property
+    def test_pose_xy_m(self) -> np.ndarray | None:
+        """Hand-verified reference tip pose, metres. None if unset."""
+        if self.test_pose is None:
+            return None
+        return np.asarray(self.test_pose.tip_xy_mm, dtype=float) * 1e-3
+
+    @property
+    def test_pose_q_rad(self) -> np.ndarray | None:
+        """Hand-verified reference joint angles, radians. None if unset."""
+        if self.test_pose is None:
+            return None
+        return np.radians(np.asarray(self.test_pose.q_deg, dtype=float))
+
     # ---------------------------------------------------------- (de)serialise
 
     @classmethod
@@ -154,6 +246,13 @@ class Config:
         geo = LinkGeometry(l1=float(d["geo"]["l1"]), l2=float(d["geo"]["l2"]))
         motors = tuple(MotorConfig(**_kw(MotorConfig, m)) for m in d["motors"])
         poly = d.get("workspace_polygon")
+        tp = d.get("test_pose")
+        test_pose = None
+        if tp is not None:
+            test_pose = TestPose(
+                tip_xy_mm=tuple(float(v) for v in tp["tip_xy_mm"]),
+                q_deg=tuple(float(v) for v in tp["q_deg"]),
+            )
         cfg = cls(
             geo=geo,
             motors=motors,
@@ -166,6 +265,7 @@ class Config:
             workspace_polygon=(
                 None if poly is None else np.asarray(poly, dtype=float)
             ),
+            test_pose=test_pose,
         )
         cfg.validate()
         return cfg
@@ -184,6 +284,7 @@ class Config:
                 None if self.workspace_polygon is None
                 else np.asarray(self.workspace_polygon).tolist()
             ),
+            "test_pose": None if self.test_pose is None else asdict(self.test_pose),
         }
 
     def to_json(self, *, indent: int = 2) -> str:
@@ -231,6 +332,8 @@ class Config:
             check(m.current_soft_max > 0, f"motor {m.node_id}: current_soft_max > 0")
             check(m.vel_gain >= 0, f"motor {m.node_id}: vel_gain >= 0")
             check(m.max_pos_gain > 0, f"motor {m.node_id}: max_pos_gain > 0")
+            check(m.limit_margin_rad >= 0, f"motor {m.node_id}: limit_margin_rad >= 0")
+            check(m.q_min_rad < m.q_max_rad, f"motor {m.node_id}: q_min_rad < q_max_rad")
         check(self.thermal.i_continuous >= 0, "thermal.i_continuous >= 0")
         check(self.thermal.budget_a2s > 0, "thermal.budget_a2s > 0")
         check(self.control.rate_hz > 0, "control.rate_hz > 0")

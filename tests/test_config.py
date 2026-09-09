@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from panto.config import Config, ConfigError, MotorConfig
 
+# The checked-in template, loaded explicitly and hermetically -- Config.load()
+# with no path also picks up a live calibration.json/config.local.json from
+# CWD or the repo root if one exists (by design, for the hand-cal workflow;
+# see panto/config.py). On rig-host that file is real and its
+# limit_margin_rad/etc. legitimately differ in the last few digits from the
+# template's rounded defaults, so any test asserting *template* values must
+# load the template explicitly rather than relying on the ambient CWD having
+# no calibration.json.
+_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "panto" / "config.template.json"
+
 
 def test_template_loads():
     cfg = Config.load()
     assert cfg.geo.l1 == 0.125 and cfg.geo.l2 == 0.125
     assert len(cfg.motors) == 2
-    assert cfg.motors[0].flip is False
-    assert cfg.motors[1].flip is True          # one motor is physically flipped
+    assert cfg.motors[0].flip is True           # 2026-09-04 hardware cal: shoulder flipped
+    assert cfg.motors[1].flip is False          # one motor is physically flipped
     assert cfg.thermal.budget_a2s == 4.0
     assert cfg.can.bitrate == 1_000_000
     assert cfg.control.rate_hz == 200.0
@@ -43,9 +54,29 @@ def test_live_override_merges_per_motor(tmp_path):
     cfg = Config.load(p)
     assert cfg.control_rate_hz == 100.0
     assert cfg.control.latency_compensation_s == 0.0     # untouched by override
-    assert cfg.motors[0].node_id == 0 and cfg.motors[0].flip is False
+    assert cfg.motors[0].node_id == 0 and cfg.motors[0].flip is True  # untouched by override
     assert cfg.motors[1].zero_offset_rad == 0.5
     assert cfg.motors[1].flip is False                   # overridden from True
+
+
+def test_test_pose_unset_by_default():
+    cfg = Config.load(_TEMPLATE_PATH)
+    assert cfg.test_pose is None
+    assert cfg.test_pose_xy_m is None
+    assert cfg.test_pose_q_rad is None
+
+
+def test_test_pose_loaded_from_calibration_json(tmp_path):
+    override = {"test_pose": {"tip_xy_mm": [110.5, 84.7], "q_deg": [93.6, -112.3]}}
+    p = tmp_path / "calibration.json"
+    p.write_text(json.dumps(override))
+
+    cfg = Config.load(p)
+    assert cfg.test_pose is not None
+    assert cfg.test_pose.tip_xy_mm == (110.5, 84.7)
+    assert cfg.test_pose.q_deg == (93.6, -112.3)
+    assert np.allclose(cfg.test_pose_xy_m, [0.1105, 0.0847])
+    assert np.allclose(cfg.test_pose_q_rad, np.radians([93.6, -112.3]))
 
 
 @pytest.mark.parametrize(
@@ -85,5 +116,44 @@ def test_round_trip_with_polygon(tmp_path):
 
 
 def test_default_construction_matches_template():
-    assert Config().to_dict()["motors"] == Config.load().to_dict()["motors"]
+    assert Config().to_dict()["motors"] == Config.load(_TEMPLATE_PATH).to_dict()["motors"]
     assert MotorConfig(1, flip=True).flip is True
+
+
+def test_template_hardware_calibrated_values():
+    cfg = Config.load()
+    assert cfg.motors[0].flip is True
+    assert cfg.motors[1].flip is False
+    for m in cfg.motors:
+        assert m.torque_constant == pytest.approx(0.02235)
+
+
+def test_motor_config_limit_defaults_unknown():
+    m = MotorConfig(0)
+    assert m.q_min_rad == float("-inf")
+    assert m.q_max_rad == float("inf")
+    assert m.limit_margin_rad == pytest.approx(0.087)
+
+
+def test_template_leaves_limits_unset():
+    cfg = Config.load(_TEMPLATE_PATH)
+    for m in cfg.motors:
+        assert m.q_min_rad == float("-inf")
+        assert m.q_max_rad == float("inf")
+
+
+def test_config_limit_arrays():
+    cfg = Config.load(_TEMPLATE_PATH)
+    cfg.motors[0].q_min_rad, cfg.motors[0].q_max_rad = -1.0, 1.0
+    cfg.motors[1].q_min_rad, cfg.motors[1].q_max_rad = -2.0, 2.0
+    assert np.array_equal(cfg.q_min_rad, np.array([-1.0, -2.0]))
+    assert np.array_equal(cfg.q_max_rad, np.array([1.0, 2.0]))
+    assert np.allclose(cfg.limit_margin_rad, [0.087, 0.087])
+
+
+def test_validate_rejects_bad_limit_ordering():
+    d = json.loads(Config.load().to_json())
+    d["motors"][0]["q_min_rad"] = 1.0
+    d["motors"][0]["q_max_rad"] = -1.0
+    with pytest.raises(ConfigError):
+        Config.from_dict(d)
