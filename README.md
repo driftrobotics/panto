@@ -64,6 +64,79 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 Running against hardware / sim is not wired up yet — see `HANDOFF.md`.
 
+## Control presets
+
+`presets.json` (repo root) is a registry of named, known-good tuning bundles
+(`stiffness`, `vel_gain`, `vel_limit`, `current`, `cap_slope`, `cap_min`,
+`ff_scale`, `max_pos_gain`), each with `notes` and `verified` provenance.
+Every bring-up script (`step_response.py`, `goto_pose.py`, `point_hold.py`,
+`offset_sweep.py`, `torque_step.py` for `current` only) takes `--preset NAME`;
+explicit flags always override the preset's values field-by-field, and the
+resolved parameters + preset name are written into the run's `meta.json`/
+`summary.json`.
+
+Current presets:
+
+- `hold-0p6` — gentle hold, 0.6 A, no feedforward. The only config that
+  converged cleanly on a 5 mm step; low force.
+- `move-1p5-sched` — slow ramped moves (`goto_pose`, ≥8 s per 100 mm). Can
+  stall the shoulder CCW near the end of a long recentre.
+- `move-2A-sched` — same as `move-1p5-sched` but 2.0 A; use this if
+  `move-1p5-sched` stalls. **Default preset for `scripts/reset_pose.py`.**
+- `step-2A-kv3` / `step-2A-kv3-ff1` — 2 A step-response tuning, with and
+  without full Coulomb feedforward (`ff_scale` 0.7 vs 1.0); `-ff1` is the
+  best 2 A config found so far (settles ±1 mm in 2.0 s).
+
+To reset the arm to a known-good pose before/between tuning runs:
+
+```bash
+python -m scripts.reset_pose                      # preset move-2A-sched, target = config.test_pose
+python -m scripts.reset_pose --target 120,80       # explicit xy, mm
+python -m scripts.reset_pose --preset move-1p5-sched --passes 3
+```
+
+It refuses to run without `calibration.json`'s `test_pose` and joint limits
+configured, reports the start pose/distance/per-pass result, confirms both
+drives end IDLE and error-free, and exits non-zero if it's still >3 mm off
+target.
+
+To add a preset from a run's log directory (reads `meta.json`):
+
+```bash
+python -m scripts.presets add my-preset --from-log logs/step_response-<stamp> --notes "..."
+python -m scripts.presets list
+python -m scripts.presets show my-preset
+python -m scripts.presets verify my-preset --log logs/step_response-<stamp>
+```
+
+## Rig cameras (rig-host)
+
+Two RealSense cameras are attached to the rig host. They are independent:
+
+- **D405 workspace camera** (serial `111111111111`): still frames and per-run
+  video via `scripts/record_cam.py` (`--serial 111111111111 --out x.mp4
+  --duration 0`, stop with `kill -TERM <pid>`). Leave it alone for streaming.
+- **D435 stream camera** (serial `222222222222`): an RTSP server, published by
+  `scripts/d435_publish.py` -> ffmpeg -> mediamtx (`scripts/mediamtx_d435.yml`,
+  user-space binary in `~/bin`, no system install).
+
+```bash
+# on rig-host (or via ssh admin@rig-host '...')
+~/bin/d435_rtsp.sh start     # background; logs to ~/d435_rtsp.log
+~/bin/d435_rtsp.sh status    # server + publisher PIDs, stream probe
+~/bin/d435_rtsp.sh restart   # after unplugging/replugging the camera
+~/bin/d435_rtsp.sh stop
+
+# view from anywhere on the LAN
+ffplay -rtsp_transport tcp rtsp://rig-host:8554/d435
+# or open rtsp://rig-host:8554/d435 in VLC
+```
+
+640x480 @ 30 fps, H.264 (x264 zerolatency; the Tegra HW encoder is not reachable
+from ffmpeg on this box). Expect ~150-300 ms latency. Port 8554 only; RTMP/HLS/
+WebRTC are disabled in the mediamtx config. `~/bin/d435_rtsp.sh` is a symlink to
+the copy in `scripts/`, so edit it in the repo and rsync.
+
 ## Prior art
 
 The SmartKnob-on-ODrive implementation (`software/odrive_knob/` on an unmerged

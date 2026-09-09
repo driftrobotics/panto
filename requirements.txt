@@ -1,8 +1,10 @@
 # Runtime
 numpy
+scipy
 python-can
 cantools
 aiohttp
 
 # Dev
 pytest
+matplotlib
