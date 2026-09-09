@@ -30,6 +30,10 @@ class ImpedanceCommand:
     anchor: np.ndarray        # impedance target [x, y] (m)
     stiffness: np.ndarray     # desired EE stiffness, 2x2 (N/m) in world frame
     force_limit: float        # N, after σ_min scaling + I²t cutback
+    qd: np.ndarray | None = None  # joint velocities [q1_dot, q2_dot] (rad/s), for
+                                   # velocity-scheduled current caps (see
+                                   # PositionBackend._current_cap). None -> no
+                                   # velocity term (schedule off / unknown).
 
 
 class ImpedanceBackend(abc.ABC):

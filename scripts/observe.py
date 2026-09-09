@@ -22,6 +22,7 @@ import numpy as np
 from panto.can_link import CanLink
 from panto.config import Config
 from panto.kinematics import forward, min_singular_value
+from panto.limits import format_limits_deg
 from panto.telemetry import RunLogger
 
 
@@ -46,12 +47,15 @@ def main() -> None:
     print(f"opening {config.can.interface}/{config.can.channel} (read-only)…")
     link.start()
     try:
-        link.wait_for_feedback(timeout=5.0)
+        link.wait_for_feedback(timeout=5.0, wait_for_errors=True)
     except Exception as exc:
         link.close()
         raise SystemExit(f"no feedback: {exc}")
 
-    print("connected. Ctrl-C to stop.\n")
+    wrap = link.wrap_turns()
+    limits_msg = f"limits (deg): {format_limits_deg(config.motors)}  wrap_turns={wrap}"
+    print(f"connected. Ctrl-C to stop.\n{limits_msg}\n")
+    log.event(limits_msg)
     print(f"{'q1 (deg)':>10} {'q2 (deg)':>10} {'x (mm)':>9} {'y (mm)':>9} "
           f"{'|v| rad/s':>10} {'i0':>6} {'i1':>6} {'age ms':>7} {'sigma_min':>10}  errors")
     period = 1.0 / args.hz

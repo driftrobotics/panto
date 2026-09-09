@@ -26,9 +26,10 @@ import time
 
 import numpy as np
 
-from panto.can_link import CanLink
+from panto.can_link import CanLink, CanLinkError
 from panto.config import Config
 from panto.kinematics import forward
+from panto.limits import format_limits_deg, q_deg
 from panto.telemetry import RunLogger
 
 
@@ -70,7 +71,8 @@ def main() -> None:
     nodes = [m.node_id for m in config.motors]
     log = RunLogger("closed_loop_check", interface=config.can.interface,
                     channel=config.can.channel, current=args.current,
-                    vel_limit=args.vel_limit, hold=args.hold)
+                    vel_limit=args.vel_limit, hold=args.hold,
+                    joint_limits_deg=format_limits_deg(config.motors))
     link = CanLink(config, sim=False)
     print(f"opening {config.can.interface}/{config.can.channel}")
     link.start()
@@ -83,8 +85,10 @@ def main() -> None:
                 log.event(f"failed to idle node {nid}: {exc}", level="ERROR")
 
     try:
-        link.wait_for_feedback(timeout=5.0)
+        link.wait_for_feedback(timeout=5.0, wait_for_errors=True)
         q0 = _dump(link, config.geo, "start", log)
+        print(f"  limits={format_limits_deg(config.motors)}")
+        log.event(f"start q_deg={q_deg(q0)} limits={format_limits_deg(config.motors)}")
         for s in link.node_status():
             if s.active_errors:
                 raise SystemExit(f"node {s.node_id} has an active error at rest "
@@ -102,7 +106,12 @@ def main() -> None:
 
         print("\n>>> entering CLOSED_LOOP_CONTROL on both axes <<<")
         log.event(">>> entering CLOSED_LOOP_CONTROL <<<")
-        link.enter_closed_loop(timeout=5.0)
+        try:
+            link.enter_closed_loop(timeout=5.0)
+        except CanLinkError as exc:
+            print(f"\n! refusing to arm: {exc}")
+            log.event(f"refusing to arm: {exc}", level="ERROR")
+            raise SystemExit(1)
         print("    both axes report CLOSED_LOOP_CONTROL\n")
 
         t_end = time.monotonic() + args.hold
