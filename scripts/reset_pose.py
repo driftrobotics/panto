@@ -83,7 +83,10 @@ def main() -> None:
     p.add_argument("--target", type=str, default=None,
                    help="'x,y' mm; default config.test_pose")
     p.add_argument("--rate", type=float, default=200.0, help="control loop Hz")
+    p.add_argument("--tol-mm", type=float, default=CONVERGED_TOL_MM,
+                   help=f"converged tolerance, mm (default {CONVERGED_TOL_MM})")
     args = p.parse_args()
+    tol_mm = float(args.tol_mm)
 
     config = Config.load(args.config)
     if args.interface:
@@ -146,10 +149,10 @@ def main() -> None:
               f"({result.abort_reason if result.aborted else 'ok'})  "
               f"end=({result.end_xy_m[0]*1e3:.1f},{result.end_xy_m[1]*1e3:.1f})mm  "
               f"remaining={remaining_mm:.1f}mm")
-        if remaining_mm <= CONVERGED_TOL_MM:
+        if remaining_mm <= tol_mm:
             break
         if pass_i < args.passes:
-            print(f"  {remaining_mm:.1f}mm > {CONVERGED_TOL_MM}mm -- "
+            print(f"  {remaining_mm:.1f}mm > {tol_mm}mm -- "
                   f"pausing {INTER_PASS_PAUSE_S:.0f}s before next pass")
             time.sleep(INTER_PASS_PAUSE_S)
         # re-approach from the current (post-pass) pose next time round;
@@ -165,14 +168,14 @@ def main() -> None:
         idle_ok = all(s.axis_state == AXIS_STATE_IDLE for s in status)
         errors_ok = all(not s.active_errors for s in status)
         print(f"\nfinal check: idle={idle_ok} errors_clear={errors_ok} "
-              f"remaining={remaining_mm:.1f}mm (tol {CONVERGED_TOL_MM}mm)")
+              f"remaining={remaining_mm:.1f}mm (tol {tol_mm}mm)")
         if not idle_ok or not errors_ok:
             for s in status:
                 print(f"  node {s.node_id}: axis_state={s.axis_state} active_errors=0x{s.active_errors:x}")
     finally:
         link.close()
 
-    if remaining_mm > CONVERGED_TOL_MM or not idle_ok or not errors_ok:
+    if remaining_mm > tol_mm or not idle_ok or not errors_ok:
         raise SystemExit(1)
 
 
