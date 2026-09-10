@@ -109,6 +109,12 @@ python -m scripts.presets show my-preset
 python -m scripts.presets verify my-preset --log logs/step_response-<stamp>
 ```
 
+## CAN link (rig-host)
+
+See [`docs/can-link.md`](docs/can-link.md): the ODrive USB-CAN adapter is auto-named
+`can_odrive` and brought up at 1 Mbit by systemd-networkd; if the interface is
+missing, the adapter is unplugged from USB.
+
 ## Rig cameras (rig-host)
 
 Two RealSense cameras are attached to the rig host. They are independent:
