@@ -845,9 +845,16 @@ def test_wall_engages_only_when_crossed_from_the_free_side():
     assert _wall_pull(rt, wall, [0.15, -0.01], [0.05, -0.01]) is False
     # ...and passing out through it from behind is transparent
     assert _wall_pull(rt, wall, [0.05, -0.01], [0.05, 0.01]) is False
-    # forced far past an engaged wall: it lets go
+    # forced far past an engaged wall: holds by default...
     assert _wall_pull(rt, wall, [0.05, 0.01], [0.05, -0.005]) is True
-    assert _wall_pull(rt, wall, [0.05, -0.005], [0.05, -0.05]) is False
+    assert _wall_pull(rt, wall, [0.05, -0.005], [0.05, -0.05]) is True
+    assert rt.telemetry()["tuning"]["wall_release_m"] == 0.0
+    # ...lets go past a configured release depth
+    rt.set_tuning(wall_release_m=0.03)
+    assert _wall_pull(rt, wall, [0.05, -0.05], [0.05, -0.06]) is False
+    rt.set_tuning(wall_release_m=0)                          # 0 = never again
+    assert _wall_pull(rt, wall, [0.05, 0.01], [0.05, -0.005]) is True
+    assert _wall_pull(rt, wall, [0.05, -0.005], [0.05, -0.08]) is True
 
 
 def test_wall_state_survives_a_resend_with_identical_geometry():

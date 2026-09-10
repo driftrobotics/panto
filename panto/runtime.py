@@ -61,7 +61,7 @@ _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajecto
 _VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
 _CURRENT_CAP_MAX = 2.0  # A; drive current_hard_max is 2.5, 2 A bursts accepted 2026-09-10
 _ELBOW_HYST_RAD = np.radians(3.0)
-_WALL_RELEASE_M = 0.03   # forced this far past an engaged wall -> it lets go
+_WALL_RELEASE_DEFAULT_M = None   # engaged walls hold; set_tuning(wall_release_m=...) to let go
 
 # Sustained-oscillation guard (user decision 2026-09-10: no K clamp, guard instead).
 _OSC_GUARD_K = 25.0   # N/m: free-air-stable tip stiffness the guard falls back to
@@ -194,6 +194,7 @@ class Runtime:
         self._elbow_mode = "auto"
         self._elbow_now = str(config.elbow)
         self._wall_state: dict[tuple, bool] = {}
+        self._wall_release_m: float | None = _WALL_RELEASE_DEFAULT_M
         self._prev_pose: np.ndarray | None = None   # last tick's pose_c, for wall crossings
         self._cur_pose: np.ndarray | None = None
 
@@ -270,7 +271,8 @@ class Runtime:
 
     _TUNING_FIELDS = ("stiffness_n_per_m", "wall_stiffness_n_per_m", "force_limit_n")
 
-    def set_tuning(self, *, vel_gain=None, current_cap_a=None, **fields: float) -> None:
+    def set_tuning(self, *, vel_gain=None, current_cap_a=None, wall_release_m="unset",
+                   **fields: float) -> None:
         """Live feel presets from the UI: any of ``stiffness_n_per_m``,
         ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats),
         ``vel_gain`` = per-motor list (pushed to the drives if armed) and
@@ -279,6 +281,12 @@ class Runtime:
         bad = set(fields) - set(self._TUNING_FIELDS)
         if bad:
             raise ValueError(f"unknown tuning field(s): {sorted(bad)}")
+        if wall_release_m != "unset":
+            rel = None if wall_release_m in (None, 0, 0.0) else float(wall_release_m)
+            if rel is not None and rel < 0.0:
+                raise ValueError("wall_release_m must be >= 0 (0 = never let go)")
+            with self._lock:
+                self._wall_release_m = rel
         if current_cap_a is not None:
             cap = float(current_cap_a)
             if not 0.0 < cap <= _CURRENT_CAP_MAX:
@@ -327,6 +335,7 @@ class Runtime:
         t["current_cap_a"] = float(max(m.current_soft_max for m in self._cfg.motors))
         t["elbow"] = self._elbow_mode
         t["elbow_now"] = self._elbow_now
+        t["wall_release_m"] = 0.0 if self._wall_release_m is None else float(self._wall_release_m)
         return t
 
     # ------------------------------------------------------------------ record
@@ -787,13 +796,14 @@ class Runtime:
         going around the end, or having the wall drawn onto you, leaves it
         inert -- and passing back out through it from behind is transparent.
         Once engaged it holds until the tip is back on the free side, or has
-        been forced more than _WALL_RELEASE_M past it."""
+        been forced more than ``wall_release_m`` past it (None = never)."""
         key = self._wall_key(c)
         if proj.penetration <= 0.0:
             self._wall_state[key] = False
             return False
         if self._wall_state.get(key, False):
-            engaged = proj.penetration <= _WALL_RELEASE_M
+            rel = self._wall_release_m
+            engaged = rel is None or proj.penetration <= rel
         else:
             engaged = self._crossed_wall(c, pose)
         self._wall_state[key] = engaged

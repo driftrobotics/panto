@@ -133,6 +133,7 @@
     <div class="row">
       <button id="snap-toggle" aria-pressed="false">Snap-to</button>
       <label>within <input id="snap-threshold" type="number" min="1" step="1" value="8"> mm</label>
+      <label title="an engaged wall lets go once forced this far past it; 0 = never">wall lets go past <input id="wall-release" type="number" min="0" step="5" value="0"> mm</label>
     </div>
     <div id="constraint-list"></div>
   </section>
@@ -357,6 +358,16 @@ function sendConstraints() {
 /* ------------------------------------------------------------------ snap-to controls */
 const snapToggleBtn = document.getElementById('snap-toggle');
 const snapThresholdInput = document.getElementById('snap-threshold');
+const wallReleaseInput = document.getElementById('wall-release');
+wallReleaseInput.onchange = () => {
+  const mm = Math.max(0, parseFloat(wallReleaseInput.value) || 0);
+  send({ type: 'set_tuning', wall_release_m: mm / 1000 });
+};
+function updateWallRelease() {
+  const t = state && state.tuning;
+  if (!t || t.wall_release_m == null || document.activeElement === wallReleaseInput) return;
+  wallReleaseInput.value = Math.round(t.wall_release_m * 1000);
+}
 snapThresholdInput.value = snapThresholdMm;
 snapToggleBtn.setAttribute('aria-pressed', String(snapOn));
 snapToggleBtn.onclick = () => {
@@ -625,6 +636,7 @@ function updateElbow() {
 function updateControls() {
   updateFeel();
   updateElbow();
+  updateWallRelease();
   const s = state;
   const armed = !!(s && s.closed_loop);
   const recording = s ? (s.recording ?? false) : false;
