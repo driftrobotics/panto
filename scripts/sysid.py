@@ -67,6 +67,7 @@ from panto.can_link import AXIS_STATE_CLOSED_LOOP_CONTROL, CanLink, CanLinkError
 from panto.config import Config
 from panto.kinematics import forward
 from panto.limits import JointLimitViolation, check_armable, check_runtime, format_limits_deg, q_deg
+from panto.step_logic import parse_per_joint
 from panto.sysid_logic import (
     CoggingFit,
     FreqResponse,
@@ -538,12 +539,13 @@ def run_friction(link, config, log, joint_idx, other_idx, start_q, other_q, excu
 
 
 def _ramp_position(link, config, log, joint_idx, other_idx, target_q, other_q, excursion_ref_m,
-                   args, ramp_s=2.0):
+                   args, ramp_s=2.0, pos_gain=None):
     motor = config.motors[joint_idx]
     period = 1.0 / args.rate
     q_all, _ = link.joint_state()
     q0 = float(q_all[joint_idx])
-    pos_gain = 0.0 if motor.vel_gain <= 0 else min(40.0 / motor.vel_gain, motor.max_pos_gain)
+    if pos_gain is None:
+        pos_gain = 0.0 if motor.vel_gain <= 0 else min(40.0 / motor.vel_gain, motor.max_pos_gain)
     t0 = time.monotonic()
     while time.monotonic() - t0 < ramp_s:
         elapsed = time.monotonic() - t0
@@ -572,10 +574,29 @@ def run_cogging(link, config, log, joint_idx, other_idx, start_q, other_q, excur
     if motor.q_max_rad < float("inf"):
         hi = min(hi, motor.q_max_rad - motor.limit_margin_rad)
     speed = math.radians(args.cogging_speed_deg_s)
-    pos_gain = 0.0 if motor.vel_gain <= 0 else min(40.0 / motor.vel_gain, motor.max_pos_gain)
+    # Bounded, non-saturating ramp loop (2026-09-10): the old pos_gain =
+    # 40/vel_gain was unbounded and bang-banged the ramp at the current cap,
+    # so the "cogging" spectrum was controller dither. Now the joint tracks the
+    # ramp with a modest joint stiffness (--cogging-k-nm-rad) on a per-joint
+    # vel_gain known to be chatter-free (--cogging-vel-gain, shoulder/elbow),
+    # with the vel_limit clamp opened so there is no torque plateau (plateau =
+    # vel_gain * vel_limit). Saturated sweeps are flagged/rejected downstream.
+    vg = parse_per_joint(args.cogging_vel_gain)[joint_idx] if isinstance(args.cogging_vel_gain, str) \
+        else float(args.cogging_vel_gain)
+    pos_gain = (args.cogging_k_nm_rad * 2.0 * math.pi) / vg          # (turn/s)/turn
+    link.set_vel_gains(motor.node_id, vg, 0.0)
+    link.set_limits(motor.node_id, args.cogging_vel_limit, motor.current_soft_max)
+    print(f"  cogging ramp loop: vel_gain={vg} pos_gain={pos_gain:.1f} "
+          f"(K_j={args.cogging_k_nm_rad} N.m/rad) vel_limit={args.cogging_vel_limit} rad/s")
 
     fits = {}
     for dirname, (q_from, q_to) in {"+": (lo, hi), "-": (hi, lo)}.items():
+        # gentle move to the sweep start first (was an instant span-sized
+        # step -> saturated the first part of every sweep)
+        _ramp_position(link, config, log, joint_idx, other_idx, q_from, other_q,
+                       excursion_ref_m, args, ramp_s=max(1.0, abs(q_from - start_q[joint_idx]) / speed),
+                       pos_gain=pos_gain)
+        time.sleep(0.5)
         duration = abs(q_to - q_from) / max(1e-6, speed)
         angles, currents = [], []
         t0 = time.monotonic()
@@ -597,13 +618,19 @@ def run_cogging(link, config, log, joint_idx, other_idx, start_q, other_q, excur
             log.sample(tag="cogging", joint=joint_idx, direction=dirname, t=elapsed,
                       q=float(q_all[joint_idx]), iq_a=float(cur[joint_idx]))
             time.sleep(period)
-        fit = cogging_spectrum(np.array(angles), np.array(currents))
+        fit = cogging_spectrum(np.array(angles), np.array(currents), cap_a=motor.current_soft_max)
+        flag = "  REJECTED (ramp pinned at the cap)" if fit.rejected else ""
         print(f"  {JOINT_NAMES[joint_idx]} cogging {dirname}: amplitude={fit.amplitude_a:.4f}A "
-              f"period={fit.period_deg:.2f}deg (n={fit.n_samples})")
+              f"period={fit.period_deg:.2f}deg torsion={fit.torsion_a_per_rad:+.3f}A/rad "
+              f"(offset {fit.torsion_offset_a:+.3f}A at mid-sweep) sat={fit.saturated_frac*100:.1f}% "
+              f"(n={fit.n_samples}){flag}")
         fits[dirname] = asdict(fit)
         _ramp_position(link, config, log, joint_idx, other_idx, start_q[joint_idx], other_q,
-                       excursion_ref_m, args)
-    return {"mode": "cogging", "joint": JOINT_NAMES[joint_idx], **fits}
+                       excursion_ref_m, args, pos_gain=pos_gain)
+    link.set_limits(motor.node_id, args.vel_limit, motor.current_soft_max)
+    torsion = [f["torsion_a_per_rad"] for f in fits.values() if not f.get("rejected")]
+    return {"mode": "cogging", "joint": JOINT_NAMES[joint_idx],
+            "torsion_a_per_rad": float(np.mean(torsion)) if torsion else None, **fits}
 
 
 # --------------------------------------------------------------------------
@@ -726,7 +753,14 @@ def build_parser() -> argparse.ArgumentParser:
                    "kinetic-friction speed segment")
     p.add_argument("--friction-seg-max-s", type=float, default=8.0)
     p.add_argument("--cogging-span-deg", type=float, default=30.0)
-    p.add_argument("--cogging-speed-deg-s", type=float, default=0.05 * 360.0,
+    p.add_argument("--cogging-k-nm-rad", type=float, default=0.5,
+                   help="cogging mode: joint stiffness of the ramp-tracking loop, N.m/rad")
+    p.add_argument("--cogging-vel-gain", type=str, default="0.01,0.05",
+                   help="cogging mode: ODrive vel_gain for the ramp loop, 'V' or 'V0,V1' (shoulder,elbow)")
+    p.add_argument("--cogging-vel-limit", type=float, default=50.0,
+                   help="cogging mode: vel_limit (joint rad/s) during the ramp; keep large so "
+                        "vel_gain*vel_limit is not a torque plateau")
+    p.add_argument("--cogging-speed-deg-s", type=float, default=5.0,
                   help="deg/s (default: 0.05 turn/s)")
     p.add_argument("--velnoise-bandwidths", type=float, nargs="+", default=[1000.0, 300.0, 100.0, 30.0])
     p.add_argument("--rest-s", type=float, default=2.0, help="cool-down between --mode all stages")
@@ -961,6 +995,7 @@ def _write_plant_model(log_dir: Path, joint_idx: int, results: list, args) -> No
             d: by_mode.get("friction", {}).get(d, {}).get("kinetic_intercept_a") for d in ("+", "-")
         },
         "cogging": {d: by_mode.get("cogging", {}).get(d) for d in ("+", "-")},
+        "torsion_a_per_rad": by_mode.get("cogging", {}).get("torsion_a_per_rad"),
         "velocity_noise_std_by_bandwidth": by_mode.get("velnoise", {}).get("std_by_bandwidth"),
         "latency": {
             "iq_latency_s": by_mode.get("latency", {}).get("iq_latency_s"),

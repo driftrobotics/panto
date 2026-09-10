@@ -1,5 +1,8 @@
 | stamp (UTC) | script | preset | K | vel_gain | vel_limit | cap A | what | verdict | metrics | I2t A2s |
 |---|---|---|---|---|---|---|---|---|---|---|
+| 20260904-211309 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
+| 20260904-211438 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
+| 20260904-211540 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
 | 20260908-152516 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
 | 20260908-152617 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
 | 20260908-165904 | breakaway |  | - | - | 10.0 | - |    |  |  | - |
@@ -50,6 +53,9 @@
 | 20260908-214039 | impedance_step |  | 25 | - | - | 5.0 | +x 5.0  | aborted |  | 11.99/11.96 |
 | 20260908-214725 | impedance_step |  | 10 | - | - | 0.8 | +x 5.0  | damped_oscillation | os 0.00 ss 1.78 settle - osc 13.4Hz | 0.04/0.01 |
 | 20260908-214833 | impedance_step |  | 25 | - | - | 0.8 | +x 5.0  | limit_cycle | os 10.86 ss 6.42 settle - osc 8.4Hz | 1.80/2.12 |
+| 20260904-201510 | observe |  | - | - | - | - |    |  |  | - |
+| 20260904-201655 | observe |  | - | - | - | - |    |  |  | - |
+| 20260905-000055 | observe |  | - | - | - | - |    |  |  | - |
 | 20260908-170108 | observe |  | - | - | - | - |    |  |  | - |
 | 20260908-170125 | observe |  | - | - | - | - |    |  |  | - |
 | 20260908-170203 | observe |  | - | - | - | - |    |  |  | - |
@@ -101,6 +107,12 @@
 | 20260909-192916 | observe |  | - | - | - | - |    |  |  | - |
 | 20260909-222853 | observe |  | - | - | - | - |    |  |  | - |
 | 20260909-232644 | observe |  | - | - | - | - |    |  |  | - |
+| 20260904-202014 | offset_sweep |  | 100 | 0.010 | 20.0 | 2.0 |  15.0  |  |  | - |
+| 20260904-202419 | offset_sweep |  | 100 | 0.010 | 20.0 | 2.0 |  15.0  |  |  | - |
+| 20260904-202522 | offset_sweep |  | 100 | 0.030 | 7.0 | 2.0 |  15.0  |  |  | - |
+| 20260904-202640 | offset_sweep |  | 100 | 0.090 | 3.0 | 2.0 |  15.0  |  |  | - |
+| 20260904-203005 | offset_sweep |  | 100 | 0.090 | 3.0 | 2.0 |  15.0  |  |  | - |
+| 20260904-203313 | offset_sweep |  | 25 | 0.090 | 20.0 | 2.0 |  15.0  |  |  | - |
 | 20260908-231800 | offset_sweep |  | 100 | 0.050/0.050 | 5.0 | 0.8 |  15.0  |  |  | - |
 | 20260908-231830 | offset_sweep |  | 100 | 0.050/0.050 | 5.0 | 0.8 |  15.0  |  |  | - |
 | 20260908-231904 | offset_sweep |  | 100 | 0.050/0.050 | 5.0 | 0.8 |  15.0  |  |  | - |
@@ -109,6 +121,29 @@
 | 20260909-003732 | offset_sweep |  | 100 | 0.050/0.050 | 5.0 | 0.8 |  15.0  |  |  | - |
 | 20260908-203007 | point_hold | step-lin-K10 | 10 | 0.050 | 1.0 | 0.8 |    |  |  | - |
 | 20260908-203034 | point_hold | step-lin-K10 | 10 | 0.050 | 1.0 | 0.8 |    |  |  | - |
+| 20260904-204040 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | aborted |  | - |
+| 20260904-204237 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 15.13 ss 5.91 settle - osc 11.6Hz | - |
+| 20260904-204353 | step_response |  | 25 | 0.030 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 16.77 ss 8.81 settle - osc 10.1Hz | - |
+| 20260904-204422 | step_response |  | 25 | 0.030 | 6.0 | 2.0 | +x 5.0  | limit_cycle | os 8.40 ss 4.54 settle - osc 11.8Hz | - |
+| 20260904-204452 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 15.97 ss 6.61 settle - osc 10.0Hz | - |
+| 20260904-204522 | step_response |  | 25 | 0.090 | 6.0 | 2.0 | +x 5.0  | limit_cycle | os 13.60 ss 5.14 settle - osc 11.7Hz | - |
+| 20260904-204552 | step_response |  | 50 | 0.030 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 11.09 ss 4.49 settle - osc 11.7Hz | - |
+| 20260904-204622 | step_response |  | 50 | 0.030 | 6.0 | 2.0 | +x 5.0  | limit_cycle | os 6.95 ss 3.69 settle - osc 11.8Hz | - |
+| 20260904-204653 | step_response |  | 50 | 0.090 | 20.0 | 2.0 | +x 5.0  | aborted |  | - |
+| 20260904-204749 | step_response |  | 50 | 0.090 | 6.0 | 2.0 | +x 5.0  | aborted |  | - |
+| 20260904-205717 | step_response |  | 25 | 0.090 | 20.0 | 0.6 | +x 5.0  | aborted |  | - |
+| 20260904-205819 | step_response |  | 25 | 0.090 | 20.0 | 1.0 | +x 5.0  | aborted |  | - |
+| 20260904-210003 | step_response |  | 25 | 0.090 | 20.0 | 0.6 | +x 5.0  | converged | os 2.05 ss 0.96 settle 2.00 osc 15.0Hz | - |
+| 20260904-210109 | step_response |  | 25 | 0.090 | 20.0 | 1.0 | +x 5.0  | limit_cycle | os 5.53 ss 2.07 settle - osc 13.5Hz | - |
+| 20260904-210648 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 11.54 ss 4.35 settle - osc 8.4Hz | 5.66/2.11 |
+| 20260904-210800 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | aborted |  | 0.28/0.15 |
+| 20260904-210916 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | damped_oscillation | os 7.38 ss 1.81 settle - osc 3.3Hz | 5.44/0.48 |
+| 20260904-211037 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 5.25 ss 1.50 settle - osc 3.4Hz | 4.96/0.25 |
+| 20260904-214046 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | no_data |  | 0.00/0.00 |
+| 20260904-215823 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 5.11 ss 1.69 settle - osc 3.4Hz | 8.06/0.54 |
+| 20260904-220221 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | damped_oscillation | os 5.05 ss 1.51 settle - osc 3.3Hz | 7.63/0.53 |
+| 20260904-220514 | step_response |  | 25 | 0.090 | 20.0 | 2.0 | +x 5.0  | damped_oscillation | os 6.31 ss 1.48 settle 1.99 osc 5.0Hz | 7.28/0.50 |
+| 20260904-235029 | step_response |  | 25 | 0.030 | 20.0 | 2.0 | +x 5.0  | limit_cycle | os 9.71 ss 4.75 settle - osc 6.7Hz | 10.48/1.46 |
 | 20260908-170526 | step_response |  | 10 | 0.090 | 6.0 | 0.3 | +x 5.0  | limit_cycle | os 3.60 ss 2.54 settle - osc 6.8Hz | 0.23/0.39 |
 | 20260908-170847 | step_response |  | 10 | 0.050 | 1.0 | 0.8 | +x 5.0  | limit_cycle | os 3.70 ss 2.41 settle - osc 12.0Hz | 0.19/2.01 |
 | 20260908-171856 | step_response |  | 10 | 0.050 | 1.0 | 0.8 | +x 5.0  | damped_oscillation | os 0.00 ss 1.90 settle - osc 18.1Hz | 0.11/0.05 |
@@ -195,7 +230,13 @@
 | 20260910-145933 | step_response | pos-bw300-K100 | 50 | 0.010/0.050 | 50.0 | 0.8 | +y 5.0  | limit_cycle | os 7.06 ss 4.24 settle - osc 5.0Hz | 2.74/0.09 |
 | 20260910-145949 | step_response | pos-bw300-K100 | 50 | 0.005/0.050 | 50.0 | 0.8 | +y 5.0  | limit_cycle | os 7.23 ss 5.07 settle - osc 3.4Hz | 2.77/0.11 |
 | 20260910-150005 | step_response | pos-bw300-K100 | 50 | 0.010/0.050 | 50.0 | 0.8 | +x 5.0  | limit_cycle | os 5.86 ss 3.05 settle - osc 3.4Hz | 2.75/0.16 |
-| 20260910-151303 | step_response | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | +y 5.0 holdff0.0 |  |  | - |
+| 20260910-151303 | step_response | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | +y 5.0 holdff0.0 | damped_oscillation | os 2.52 ss 0.56 settle 1.95 osc 16.8Hz | 0.11/0.03 |
+| 20260910-151317 | step_response | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | +y 5.0 holdff1.0 | damped_oscillation | os 3.84 ss 0.51 settle 1.99 osc 25.4Hz | 0.11/0.03 |
+| 20260910-151331 | step_response | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | +x 5.0 holdff1.0 | converged | os 2.74 ss 0.42 settle 0.85 osc 11.7Hz | 0.32/0.04 |
+| 20260910-151436 | step_response | hover-K25-pj | 50 | 0.010/0.050 | 50.0 | 1.5 | +y 5.0 holdff1.0 | limit_cycle | os 12.78 ss 9.41 settle - osc 3.4Hz | 9.63/0.12 |
+| 20260910-151450 | step_response | hover-K25-pj | 50 | 0.010/0.050 | 50.0 | 2.0 | +y 5.0 holdff1.0 | limit_cycle | os 13.78 ss 10.50 settle - osc 3.4Hz | 14.73/0.16 |
+| 20260910-151504 | step_response | hover-K25-pj | 100 | 0.010/0.050 | 50.0 | 2.0 | +y 5.0 holdff1.0 | stall | os 23.42 ss 14.40 settle - osc 3.4Hz | 14.74/12.03 |
+| 20260910-151829 | step_response | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | +y 5.0 holdff1.0 | converged | os 2.47 ss 0.29 settle 0.33 osc 13.5Hz | 0.27/0.03 |
 | 20260909-192944 | stiffness_bench |  | - | - | - | - |    |  |  | - |
 | 20260909-193101 | stiffness_bench |  | - | - | - | - |    |  |  | - |
 | 20260909-193350 | stiffness_bench |  | - | - | - | - |    |  |  | - |
@@ -273,6 +314,13 @@
 | 20260910-150910 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
 | 20260910-151059 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
 | 20260910-151114 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151231 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151246 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151445 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151500 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151653 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151709 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
+| 20260910-151752 | test_sysid_chirp |  | - | - | - | - |    |  |  | - |
 | 20260908-222032 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
 | 20260908-224205 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
 | 20260908-225924 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
@@ -294,6 +342,9 @@
 | 20260910-150656 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
 | 20260910-150942 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
 | 20260910-151145 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
+| 20260910-151317 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
+| 20260910-151531 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
+| 20260910-151740 | test_sysid_cogging |  | - | - | - | - |    |  |  | - |
 | 20260908-222037 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
 | 20260908-224210 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
 | 20260908-225930 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
@@ -315,6 +366,9 @@
 | 20260910-150702 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
 | 20260910-150947 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
 | 20260910-151150 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
+| 20260910-151323 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
+| 20260910-151537 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
+| 20260910-151745 | test_sysid_friction |  | - | - | - | - |    |  |  | - |
 | 20260908-222013 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
 | 20260908-222022 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
 | 20260908-224149 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
@@ -357,6 +411,16 @@
 | 20260910-150934 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
 | 20260910-151129 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
 | 20260910-151137 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151302 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151310 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151516 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151524 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151724 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260910-151732 | test_sysid_latency |  | - | - | - | - |    |  |  | - |
+| 20260904-201012 | torque_step |  | - | - | - | - |    |  |  | - |
+| 20260904-201112 | torque_step |  | - | - | - | - |    |  |  | - |
+| 20260905-042752 | torque_step |  | - | - | - | - |    |  |  | - |
+| 20260905-043142 | torque_step |  | - | - | - | - |    |  |  | - |
 | 20260908-225100 | torque_step |  | - | - | - | - |    |  |  | - |
 | 20260908-225114 | torque_step |  | - | - | - | - |    |  |  | - |
 | 20260908-232020 | torque_step |  | - | - | - | - |    |  |  | - |
@@ -428,3 +492,11 @@
 | 20260910-151003 | trace_shape | step-lin-K10 | 10 | 0.050/0.050 | 1.0 | 0.8 | box 10.0 200.0mm/s | poor | rms 4.79 max 8.42 | 0.00/0.00 |
 | 20260910-151004 | trace_shape | step-lin-K10 | 25 | - | - | 0.8 | box 10.0 200.0mm/s | poor | rms 4.68 max 7.34 | 0.02/0.01 |
 | 20260910-151207 | trace_shape | step-lin-K10 | 25 | - | - | 0.8 | box 10.0 200.0mm/s | poor | rms 4.53 max 6.73 | 0.03/0.01 |
+| 20260910-151339 | trace_shape | step-lin-K10 | 10 | 0.050/0.050 | 1.0 | 0.8 | box 10.0 200.0mm/s | poor | rms 4.85 max 8.20 | 0.00/0.00 |
+| 20260910-151340 | trace_shape | step-lin-K10 | 25 | - | - | 0.8 | box 10.0 200.0mm/s | poor | rms 4.70 max 7.38 | 0.03/0.02 |
+| 20260910-151351 | trace_shape | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | box 25.0 10.0mm/s holdff1.0 | ok | rms 0.84 max 2.52 | 0.45/0.05 |
+| 20260910-151413 | trace_shape | hover-K25-pj | 25 | 0.010/0.050 | 50.0 | 0.8 | box 25.0 10.0mm/s holdff0.0 | ok | rms 1.10 max 3.02 | 0.42/0.05 |
+| 20260910-151553 | trace_shape | step-lin-K10 | 10 | 0.050/0.050 | 1.0 | 0.8 | box 10.0 200.0mm/s | poor | rms 4.75 max 8.37 | 0.00/0.00 |
+| 20260910-151554 | trace_shape | step-lin-K10 | 25 | - | - | 0.8 | box 10.0 200.0mm/s | poor | rms 4.61 max 6.93 | 0.02/0.01 |
+| 20260910-151801 | trace_shape | step-lin-K10 | 10 | 0.050/0.050 | 1.0 | 0.8 | box 10.0 200.0mm/s | poor | rms 4.78 max 8.19 | 0.00/0.00 |
+| 20260910-151802 | trace_shape | step-lin-K10 | 25 | - | - | 0.8 | box 10.0 200.0mm/s | poor | rms 4.82 max 7.57 | 0.03/0.02 |

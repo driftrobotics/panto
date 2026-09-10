@@ -3,7 +3,7 @@
 Narrative record of what was tried and learned, newest first. Run names are
 `logs/<script>-<stamp>` on rig-host (`admin@rig-host:~/code/panto/logs`); the
 machine-generated index of every run with its config and metrics is
-`experiments/runs.md` (`python -m scripts.experiment_log --since 2026-09-08 --out experiments/runs.md`
+`experiments/runs.md` (`python -m scripts.experiment_log --since 2026-09-04 --out experiments/runs.md`
 on rig-host). Plots referenced here live in `experiments/plots/`.
 
 Conventions: tip frame +x along the table edge toward the camera, +y into the
@@ -79,11 +79,30 @@ the touch; no mandatory cooldowns while inside motor spec.
 
 ## 2026-09-08 — estimator root cause
 
+- Re-zero + breakaway after rework: `breakaway-20260908-152516/152617` (raw
+  re-zero), low-friction confirmation shoulder CCW 0.37 A, CW 0.16, elbow
+  0.10 A. Retune-from-bottom step_responses K10/25 straddle the pos_gain-bug
+  fix boundary (~17:08 UTC): `step_response-20260908-165904..173256`
+  (boundary not resolved to individual runs — see `experiments/run_notes.md`).
+- Post-fix gain ladder, batch `20260908-203007..214956` (93 runs: step_response,
+  impedance_step, point_hold, trace_shape): K=10 clean (os 0, ss 1.9 mm);
+  K=25 rings 13.5 Hz at the cap regardless of vel_gain; vel_gain ≤0.03 rule;
+  `point_hold-20260908-203034` tap test (no sustained structural mode);
+  vel_limit A/B (clean at vl=1, limit-cycles at vl=5); hand-on-handle test
+  clean K=25/50/100 at vg 0.03 (preset `hand-K100-vg03`, in-use only);
+  first `trace_shape` box traces (preset `step-lin-K10` plateau-starved;
+  vel_gain 0.1 traces but buzzes ±8 mm at 12 Hz).
 - `encoder_bandwidth` 100 added 40–85° of velocity-estimate lag at 10–20 Hz →
   every limit cycle seen before. 300 saved on both drives. K50/100/200 steps
   converged (at pose (100,94)); box RMS 2.7–2.8 mm limited by shoulder
   friction 0.5–0.7 A (harness torsion, pose-dependent). Preset
   `pos-bw300-K100`, videos `box_K100_bw300.mp4`, `offset_K100_bw300.mp4`.
+  Sysid suite batch `20260908-221334..232532` (107 runs): chirp FRFs
+  `sysid-20260908-224420` (elbow), `-224509` (shoulder) identified the bw100
+  lag as root cause; offset_sweep runs in this batch are the ones unaffected
+  by the pos_gain bug. Reference-video runs `trace_shape-20260909-003643`
+  and `offset_sweep-20260909-003732` (box RMS 2.7 mm; offsets ±15 mm,
+  residual 2.1–4.1 mm) back the preset above.
 
 ## 2026-09-04 — bring-up
 
@@ -91,4 +110,11 @@ the touch; no mandatory cooldowns while inside motor spec.
   fixed. pos_gain bug (config-default vel_gain → ~30× stated K) voided all
   step results 09-04 evening → 09-08 17:08 UTC. Torque-mode 4 mN·m plateau
   gotcha (`enable_torque_mode_vel_limit`). Bus raised to 20 V, hard max 2.5 A,
-  session cap 2 A.
+  session cap 2 A. Bring-up sweep batch `20260904-201012..211540` (31 runs:
+  breakaway, offset_sweep, step_response, torque_step) — labelled K in this
+  window is ~30× actual per the pos_gain bug above; the 21:00 UTC cap-sweep
+  root-cause finding below falls inside it (qualitative shape only, not the
+  K label). Evening-close retest `step_response-20260904-215823..220514`
+  (post velocity-scheduled-cap fix, still inside the void-K window).
+  Isolated `torque_step-20260905-042752..043142` on 09-05 is uncovered by
+  any note (see `experiments/run_notes.md`).

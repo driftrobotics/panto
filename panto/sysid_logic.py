@@ -518,11 +518,19 @@ class CoggingFit:
     amplitude_a: float        # half the peak-to-peak of the dominant harmonic
     period_deg: float         # spatial period of the dominant harmonic
     n_samples: int
+    torsion_a_per_rad: float = 0.0   # linear Iq(q) trend removed before the FFT (harness spring)
+    torsion_offset_a: float = 0.0    # Iq at the sweep's mean angle (bias term of that trend)
+    saturated_frac: float = 0.0      # fraction of samples with |Iq| >= SAT_FRAC * cap_a
+    rejected: bool = False           # True when saturated_frac > SAT_REJECT_FRAC (bang-bang ramp)
+
+
+SAT_FRAC = 0.95           # |Iq| above this fraction of the cap counts as pinned
+SAT_REJECT_FRAC = 0.05    # reject the sweep if more than this fraction is pinned
 
 
 def cogging_spectrum(angle_rad: np.ndarray, iq_a: np.ndarray, *,
                      n_resample: int = 720, min_period_deg: float = 1.0,
-                     max_period_deg: float = 60.0) -> CoggingFit:
+                     max_period_deg: float = 60.0, cap_a: float | None = None) -> CoggingFit:
     """Resample the (angle, Iq) trace onto a uniform angle grid (constant
     velocity in the raw trace makes this close to a no-op, but a uniform grid
     is what an angle-domain FFT assumes), detrend, FFT in the angle domain,
@@ -532,13 +540,25 @@ def cogging_spectrum(angle_rad: np.ndarray, iq_a: np.ndarray, *,
     work the same way."""
     angle = np.asarray(angle_rad, float)
     iq = np.asarray(iq_a, float)
+    sat_frac = 0.0
+    if cap_a is not None and cap_a > 0 and len(iq):
+        sat_frac = float(np.mean(np.abs(iq) >= SAT_FRAC * cap_a))
+    rejected = sat_frac > SAT_REJECT_FRAC
     order = np.argsort(angle)
     angle, iq = angle[order], iq[order]
     # drop duplicate angle samples (np.interp needs strictly increasing x)
     keep = np.concatenate([[True], np.diff(angle) > 1e-9])
     angle, iq = angle[keep], iq[keep]
     if len(angle) < 8:
-        return CoggingFit(float("nan"), float("nan"), len(angle))
+        return CoggingFit(float("nan"), float("nan"), len(angle), saturated_frac=sat_frac,
+                          rejected=rejected)
+
+    # remove the linear Iq(q) trend (harness torsion spring) BEFORE the
+    # spectrum, otherwise the sweep-length ramp dominates the longest bin.
+    slope, intercept = np.polyfit(angle, iq, 1)
+    q_mean = float(np.mean(angle))
+    torsion_offset = float(intercept + slope * q_mean)
+    iq = iq - (intercept + slope * angle)
 
     span_deg = math.degrees(angle[-1] - angle[0])
     grid = np.linspace(angle[0], angle[-1], n_resample)
@@ -552,11 +572,12 @@ def cogging_spectrum(angle_rad: np.ndarray, iq_a: np.ndarray, *,
         period_deg_axis = np.where(freqs_per_deg > 0, 1.0 / freqs_per_deg, np.inf)
     mask = (period_deg_axis >= min_period_deg) & (period_deg_axis <= max_period_deg)
     if not np.any(mask):
-        return CoggingFit(0.0, float("nan"), len(angle))
+        return CoggingFit(0.0, float("nan"), len(angle), float(slope), torsion_offset, sat_frac, rejected)
 
     mags = np.abs(spectrum)
     idx_local = np.argmax(mags[mask])
     idx = np.flatnonzero(mask)[idx_local]
     amplitude_a = float(2.0 * mags[idx] / n_resample)  # single-sided amplitude
     period_deg = float(period_deg_axis[idx])
-    return CoggingFit(amplitude_a, period_deg, len(angle))
+    return CoggingFit(amplitude_a, period_deg, len(angle), float(slope), torsion_offset,
+                      sat_frac, rejected)

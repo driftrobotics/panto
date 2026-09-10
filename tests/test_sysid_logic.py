@@ -390,3 +390,24 @@ def test_full_chirp_pipeline_recovers_known_plant_with_noisy_high_band():
     assert np.isfinite(fit.inertia_kg_m2)
     assert fit.inertia_kg_m2 == pytest.approx(J_true, rel=0.3)
     assert abs(fit.delay_s - delay_true) < 0.003
+
+
+def test_cogging_spectrum_removes_torsion_trend_and_reports_it():
+    angle_deg = np.linspace(60.0, 90.0, 900)
+    angle = np.radians(angle_deg)
+    torsion = 0.9 * (angle - angle.mean()) + 0.2          # A/rad spring + bias
+    iq = torsion + 0.05 * np.sin(2 * np.pi * angle_deg / 4.3)
+    fit = cogging_spectrum(angle, iq, cap_a=0.8)
+    assert abs(fit.torsion_a_per_rad - 0.9) < 0.05   # partial sine cycles bias the line fit slightly
+    assert abs(fit.torsion_offset_a - 0.2) < 0.02
+    assert abs(fit.period_deg - 4.3) < 0.3
+    assert abs(fit.amplitude_a - 0.05) < 0.01
+    assert fit.saturated_frac == 0.0 and not fit.rejected
+
+
+def test_cogging_spectrum_rejects_bang_bang():
+    angle = np.radians(np.linspace(60.0, 90.0, 900))
+    iq = 0.8 * np.sign(np.sin(2 * np.pi * np.linspace(0, 15, 900)))   # pinned at +/-cap
+    fit = cogging_spectrum(angle, iq, cap_a=0.8)
+    assert fit.saturated_frac > 0.9
+    assert fit.rejected
