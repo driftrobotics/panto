@@ -596,6 +596,12 @@ class CanLink:
         ])
         return q, qd
 
+    def raw_turns(self) -> np.ndarray:
+        """Uncalibrated encoder position per node, turns (session wrap
+        included). Read-only; the calibration UI derives zero offsets from it."""
+        with self._lock:
+            return np.array([fb.pos_turns for fb in self._feedback], dtype=float)
+
     def feedback_age_s(self) -> float:
         """Age of the *newer* of the two encoder frames — feeds latency comp."""
         with self._lock:

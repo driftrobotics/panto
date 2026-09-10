@@ -295,3 +295,95 @@ Sent (not broadcast) in response to a failed `engage`, `playback`, or `trace_sha
 `engage` (no payload), `trace_shape {shape, size_m, centre:[x,y], speed, laps}`.
 `record_start` / `record_stop` / `playback {id}` / `set_idle` already existed as
 contract names above but were never dispatched — this is where they land.
+
+## Phase 1 — remaining milestones, five parallel streams (2026-09-10)
+
+Coordinator: panto-d8. Another session (hold-torque feedforward: `backends/position.py`,
+`config.py`, `scripts/step_response.py`, `scripts/trace_shape.py`, `tests/test_backends.py`,
+`scripts/fit_hold_ff.py`, `experiments/`) is live in the same tree — **no stream touches those**.
+No stream runs anything on the rig; everything is sim/unit-tested. Hardware validation is a
+separate, serialized campaign run by the coordinator with the user present.
+
+| stream | owns (create/edit) | milestone |
+|---|---|---|
+| A — constraint authoring UI | `ui/index.html` | 4, 5, 7 |
+| B — runtime safety | `panto/runtime.py`, `panto/limits.py`, `tests/test_runtime.py`, `tests/test_limits.py` | 5, 7, deferred TODOs |
+| C — settings + calibration UI | `panto/web.py`, `ui/settings.html`, `ui/calibrate.html`, `tests/test_web.py` | spec "settings UI", "calibration UI" |
+| D — sysid cogging fix + A/B bench | `panto/sysid_logic.py`, `scripts/sysid.py`, `panto/ab_logic.py`, `scripts/ab_bench.py`, `tests/test_sysid_logic.py`, `tests/test_ab_logic.py` | 3, 6 |
+| E — sim fidelity | `panto/sim.py`, `tests/test_sim.py` | unblocks 4–6 off-rig |
+
+Shared/foreign files: put the exact diff in your final report; the coordinator applies it.
+
+### A — constraint authoring (speaks the existing `set_constraints` JSON only)
+
+Canvas tools, one active at a time: **point** (click, exists), **line** (drag a→b; sends
+`{kind:"line", a:[x,y], d:[dx,dy]}` with `d` unit), **wall** (drag a→b then click the free
+side; sends `{kind:"wall", a:[x,y], normal:[nx,ny]}`, `normal` unit, pointing to the *free*
+side), **grid** (toggle + pitch in mm; `{kind:"grid", pitch, origin:[0,0]}`; hotkey `g`).
+Multiple constraints coexist: a list with per-item delete; every change resends the full
+list. Render each constraint on the canvas (walls hatched on the blocked side). `errors`
+strings (taxonomy below) and `tripped` render in the State panel; a `clear_errors` button
+sends `{type:"clear_errors"}`. Read `state.workspace` (below) and draw the boundary annulus.
+
+### B — runtime safety
+
+- **Always-on `WorkspaceBoundary`**: built from config in `__init__`, always in the solve
+  set, never removable by `set_constraints`. Telemetry gains
+  `"workspace": {"r_min": m, "r_max": m}` (the valid annulus radii at `sigma_min_threshold`).
+- **I²t hard trip**: any `i2t_frac >= 1.0` → `set_idle()` + latch. Telemetry gains
+  `"tripped": bool`; while tripped `engage()` raises `RuntimeError("tripped: over_torque")`.
+  `Runtime.clear_errors()` clears the latch and calls `link.clear_errors(node)` per motor.
+- **Error taxonomy** (`errors` list entries, stable prefixes the UI keys on):
+  `drive:axis{n}:0x{hex}` (from `axis_errors`), `over_torque` (I²t latch),
+  `unsolvable` (IK failed in the loop), `workspace` (boundary active this tick).
+- **No loop crash on `Unreachable`** in PLOTTER/INTERACTIVE: `relax()`, push `unsolvable`,
+  keep ticking.
+- `Runtime.add_tick_listener(fn: Callable[[dict], None])`: called after `_publish` each
+  tick with the telemetry dict; must be cheap; exceptions logged, never propagated.
+- Web wiring (`clear_errors` message → `runtime.clear_errors()`) belongs to C; B's report
+  states the call, C dispatches it.
+
+### C — settings + calibration (offline is fine per spec: write files, say "restart")
+
+- `GET /api/config` → merged config as JSON (`Config.to_json()`).
+  `POST /api/config` body = partial JSON → deep-merged into `config.local.json`, response
+  `{"ok": true, "restart_required": true}`. Validate by round-tripping through
+  `Config.load()` on the merged result before writing. Do **not** edit `config.py`.
+- `GET /api/calibration/raw` → `{"turns": [t0, t1], "q_deg": [..], "pose_mm": [..],
+  "closed_loop": bool}` from `link.raw_turns()` (new, read-only) + `joint_state()`.
+- `POST /api/calibration/zero`: arm held straight (q = 0, 0). Per motor
+  `zero_offset_rad = -s·2π·turns`, `s = -1 if flip else 1` (the 2026-09-04 recipe);
+  writes `motors[i].zero_offset_rad` into `calibration.json`, preserving every other key.
+- `POST /api/calibration/limit {"motor": i, "end": "min"|"max"}`: records current `q[i]`
+  as `q_min_rad`/`q_max_rad` for that motor.
+- `POST /api/calibration/workspace {"polygon": [[x,y],...]}` → `workspace_polygon`.
+- All calibration POSTs refuse with 409 while `closed_loop` is true (passive only).
+- `/settings` and `/calibrate` serve the two pages; both are plain-JS like `index.html`.
+- Dispatch `clear_errors` → `self._rt.clear_errors()` (guard with `getattr` until B lands).
+
+### D — sysid cogging fix + A/B bench
+
+- Cogging mode currently bang-bangs at ±0.8 A (unbounded `pos_gain = 40/vel_gain`). Fix:
+  bounded gains (pos_gain ≤ a `--cog-pos-gain` default 20, vel_limit = the ramp speed × 1.5),
+  reject the run if |Iq| pins at the cap > 5 % of samples. Before the spectrum, fit and
+  remove a linear `Iq(q)` trend and report it as `"torsion_a_per_rad"` (measured harness
+  spring, ~3 A/rad shoulder on 2026-09-09). `plant_model.json` keys are frozen as written by
+  `_write_plant_model` today; you may **add** `"torsion_a_per_rad"`, never rename.
+- `scripts/ab_bench.py` + `panto/ab_logic.py`: identical line + wall task on
+  `--backend position` and `--backend torque`, at a stated `--pose`, metrics per backend:
+  tangential-drag RMS current while sliding along the constraint at a commanded speed,
+  normal stiffness from a lateral offset step (mm per N-equivalent, in amps), overshoot,
+  I²t per run. Output `logs/ab_bench-<utc>/report.{json,md}`. Must run end-to-end in
+  `--sim`; hardware flags mirror `stiffness_bench.py` (cool-downs, disarm abort).
+
+### E — sim fidelity (defaults must leave every existing test byte-identical)
+
+`SimParams` gains: `torsion_a_per_rad: float = 0.0` (joint-frame spring, applied as
+`-k·(angle - angle_home)·torque_constant`), `coulomb_a: float | None` (overrides
+`friction` in amps when set), `delay_s: float = 0.0` (FIFO delay on the controller torque).
+`PantoSim` gains `coupled: bool = False` → 2R inertia matrix `M(q)` with off-diagonal
+`M12(q2)` from `LinkGeometry` masses (add `m1, m2, com1, com2` defaults to `SimParams`).
+`SimParams.from_plant_model(path, torque_constant)` loads a sysid `plant_model.json`
+(`inertia_a_s2_per_rad`, `viscous_a_per_rad_s`, `friction_kinetic_intercept_a`, `delay_s`,
+optional `torsion_a_per_rad`). `--sim` stays independent-rotor by default; expose
+`--sim-plant <path>` in the report as a `__main__.py` diff, not by editing it.
