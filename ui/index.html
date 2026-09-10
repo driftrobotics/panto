@@ -28,7 +28,7 @@
   button:hover { border-color:#3a4152; background:#1c212b; }
   button[aria-pressed="true"] { border-color:var(--dot); background:#1a1f33; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0; font-variant-numeric:tabular-nums; }
-  dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); } dd.ok { color:var(--ok); }
+  dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); } dd.ok { color:var(--ok); } dd.bad { color:var(--bad); }
   .hint { color:var(--muted); font-size:12px; margin:0 0 10px; }
   #status { font-size:12px; color:var(--muted); }
   #status::before { content:"● "; }
@@ -46,6 +46,16 @@
     transition:opacity .2s ease; z-index:10;
   }
   #toast.show { opacity:1; }
+  #constraint-list { margin-top:8px; }
+  .c-row {
+    display:flex; align-items:center; justify-content:space-between; gap:6px;
+    padding:4px 6px; border:1px solid var(--line); border-radius:6px; margin-bottom:4px;
+    font-size:12px; cursor:pointer;
+  }
+  .c-row:hover { border-color:#3a4152; }
+  .c-row.selected { border-color:var(--dot); background:#1a1f33; }
+  .c-row span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .c-row button { margin:0 0 0 4px; padding:2px 6px; font-size:11px; }
 </style>
 </head>
 <body>
@@ -53,7 +63,7 @@
   <canvas id="view" width="440" height="440"></canvas>
   <div id="status" class="dead">connecting…</div>
   <button id="engage-toggle" disabled>Engage</button>
-  <div class="hint">click to set a hold point · drag from the tip to apply a "hand" force (sim)</div>
+  <div class="hint">drag with the selected tool to author a constraint · drag from the tip for a "hand" force (sim) · g toggles a default grid · Delete removes the selected constraint</div>
 </main>
 <div id="toast"></div>
 
@@ -64,9 +74,17 @@
   </section>
 
   <section>
-    <h2>Constraint</h2>
-    <button id="clear-c">clear</button>
-    <span id="c-desc" class="hint">none</span>
+    <h2>Constraints</h2>
+    <div id="tool-palette">
+      <button data-tool="point" aria-pressed="true">Point</button>
+      <button data-tool="line">Line</button>
+      <button data-tool="wall">Wall</button>
+      <button data-tool="grid">Grid</button>
+      <button data-tool="select">Select</button>
+    </div>
+    <label>grid pitch <input id="grid-pitch" type="number" min="1" step="1" value="20"> mm</label>
+    <button id="clear-c">Clear all</button>
+    <div id="constraint-list"></div>
   </section>
 
   <section>
@@ -103,8 +121,10 @@
       <dt>σ_min(J)</dt><dd id="s-sig">–</dd>
       <dt>currents</dt><dd id="s-cur">–</dd>
       <dt>I²t</dt><dd id="s-i2t">–</dd>
+      <dt>tripped</dt><dd id="s-tripped">–</dd>
       <dt>errors</dt><dd id="s-err">–</dd>
     </dl>
+    <button id="clear-err">Clear errors</button>
   </section>
 
   <section>
@@ -128,8 +148,13 @@ const PX = cv.width / (2.4 * REACH);            // metres -> pixels
 const OX = cv.width / 2, OY = cv.height / 2;    // base joint at canvas centre
 
 let ws = null, state = null, controller = false, sim = false, modes = [];
-let constraint = null;                          // {kind:'point', at:[x,y]}
-let dragging = false;
+
+// ------------------------------------------------------------------ constraint authoring
+let constraints = [];                            // [{kind:'point'|'line'|'wall'|'grid', ...}]
+let activeTool = 'point';                         // 'point'|'line'|'wall'|'grid'|'select'
+let selectedIndex = -1;
+let authoring = false, draft = null;              // {kind, a:[x,y], cur:[x,y]}
+let dragging = false;                             // sim "hand" drag
 
 const m2p = (x, y) => [OX + x * PX, OY - y * PX];
 const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
@@ -142,7 +167,7 @@ function connect() {
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') { controller = m.controller; sim = m.sim; modes = m.modes; renderModes(); }
-    else if (m.type === 'role') { controller = m.controller; renderModes(); }
+    else if (m.type === 'role') { controller = m.controller; renderModes(); updateControls(); }
     else if (m.type === 'state') { state = m; draw(); panel(m); }
     else if (m.type === 'error') { showToast(m.message); }
   };
@@ -174,11 +199,103 @@ function renderModes() {
   });
   updateControls();
 }
+
+/* ------------------------------------------------------------------ tool palette */
+function setTool(tool) {
+  activeTool = tool;
+  selectedIndex = -1;
+  document.querySelectorAll('#tool-palette button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.tool === tool)));
+  renderConstraintList();
+  draw();
+}
+document.querySelectorAll('#tool-palette button').forEach(b => {
+  b.onclick = () => setTool(b.dataset.tool);
+});
+
+function sendConstraints() {
+  send({ type: 'set_constraints', constraints });
+}
+
 document.getElementById('clear-c').onclick = () => {
-  constraint = null;
-  document.getElementById('c-desc').textContent = 'none';
-  send({ type: 'set_constraints', constraints: [] });
+  if (!controller) return;
+  constraints = [];
+  selectedIndex = -1;
+  sendConstraints();
+  renderConstraintList();
+  draw();
 };
+
+document.getElementById('clear-err').onclick = () => send({ type: 'clear_errors' });
+
+/* ------------------------------------------------------------------ constraint list panel */
+function describeConstraint(c) {
+  switch (c.kind) {
+    case 'point':
+      return `point (${c.at[0].toFixed(3)}, ${c.at[1].toFixed(3)})`;
+    case 'line':
+      return `line a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)}) d=(${c.d[0].toFixed(2)}, ${c.d[1].toFixed(2)})`;
+    case 'wall':
+      return `wall a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)}) n=(${c.normal[0].toFixed(2)}, ${c.normal[1].toFixed(2)})`;
+    case 'grid':
+      return `grid pitch=${(c.pitch * 1000).toFixed(1)}mm`;
+    default:
+      return c.kind;
+  }
+}
+
+function renderConstraintList() {
+  const host = document.getElementById('constraint-list');
+  host.innerHTML = '';
+  if (!constraints.length) {
+    const p = document.createElement('div');
+    p.className = 'hint';
+    p.textContent = 'none';
+    host.appendChild(p);
+    return;
+  }
+  constraints.forEach((c, i) => {
+    const row = document.createElement('div');
+    row.className = 'c-row' + (i === selectedIndex ? ' selected' : '');
+    const label = document.createElement('span');
+    label.textContent = describeConstraint(c);
+    row.appendChild(label);
+    if (c.kind === 'wall') {
+      const flip = document.createElement('button');
+      flip.textContent = '⇅';
+      flip.title = 'flip free side';
+      flip.onclick = ev => {
+        ev.stopPropagation();
+        if (!controller) return;
+        c.normal = [-c.normal[0], -c.normal[1]];
+        sendConstraints();
+        renderConstraintList();
+        draw();
+      };
+      row.appendChild(flip);
+    }
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.title = 'delete';
+    del.onclick = ev => {
+      ev.stopPropagation();
+      if (!controller) return;
+      constraints.splice(i, 1);
+      if (selectedIndex === i) selectedIndex = -1;
+      else if (selectedIndex > i) selectedIndex -= 1;
+      sendConstraints();
+      renderConstraintList();
+      draw();
+    };
+    row.appendChild(del);
+    row.addEventListener('click', () => {
+      selectedIndex = i;
+      renderConstraintList();
+      draw();
+    });
+    host.appendChild(row);
+  });
+}
 
 /* ------------------------------------------------------------------ engage / passive */
 const engageBtn = document.getElementById('engage-toggle');
@@ -229,6 +346,39 @@ function updateControls() {
     : (recordedSamples > 0 ? `${recordedSamples} samples recorded` : 'not recording');
 
   traceBtn.disabled = !controller;
+  document.getElementById('clear-c').disabled = !controller;
+  document.getElementById('clear-err').disabled = !controller;
+}
+
+/* ------------------------------------------------------------------ pointer / hit-testing */
+function perpDist(mx, my, a, d) {
+  const len = Math.hypot(d[0], d[1]) || 1;
+  const ux = d[0] / len, uy = d[1] / len;
+  const relx = mx - a[0], rely = my - a[1];
+  const t = relx * ux + rely * uy;
+  const px = a[0] + t * ux, py = a[1] + t * uy;
+  return Math.hypot(mx - px, my - py);
+}
+
+function hitTest(mx, my) {
+  const thresholdM = 12 / PX;
+  let best = -1, bestD = thresholdM;
+  constraints.forEach((c, i) => {
+    let d = Infinity;
+    if (c.kind === 'point') {
+      d = Math.hypot(mx - c.at[0], my - c.at[1]);
+    } else if (c.kind === 'line') {
+      d = perpDist(mx, my, c.a, c.d);
+    } else if (c.kind === 'wall') {
+      d = perpDist(mx, my, c.a, [-c.normal[1], c.normal[0]]);
+    } else if (c.kind === 'grid') {
+      const gx = c.origin[0] + Math.round((mx - c.origin[0]) / c.pitch) * c.pitch;
+      const gy = c.origin[1] + Math.round((my - c.origin[1]) / c.pitch) * c.pitch;
+      d = Math.hypot(mx - gx, my - gy);
+    }
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
 }
 
 cv.addEventListener('pointerdown', e => {
@@ -238,30 +388,221 @@ cv.addEventListener('pointerdown', e => {
     dragging = true; cv.setPointerCapture(e.pointerId); return;
   }
   if (!controller) return;
+
+  if (activeTool === 'select') {
+    selectedIndex = hitTest(mx, my);
+    renderConstraintList();
+    draw();
+    return;
+  }
+
   if (Math.hypot(mx, my) > REACH * 0.98) return;
-  constraint = { kind: 'point', at: [mx, my] };
-  document.getElementById('c-desc').textContent = `point (${mx.toFixed(3)}, ${my.toFixed(3)})`;
-  send({ type: 'set_constraints', constraints: [constraint] });
+
+  authoring = true;
+  cv.setPointerCapture(e.pointerId);
+  draft = { kind: activeTool, a: [mx, my], cur: [mx, my] };
+  draw();
 });
 cv.addEventListener('pointermove', e => {
-  if (!dragging || !state) return;
   const r = cv.getBoundingClientRect();
   const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
-  // crude: pull toward the cursor as a joint-space torque couple
-  const dx = mx - state.pose[0], dy = my - state.pose[1];
-  send({ type: 'perturb', tau: [8 * dx, 8 * dy] });
+  if (dragging && state) {
+    // crude: pull toward the cursor as a joint-space torque couple
+    const dx = mx - state.pose[0], dy = my - state.pose[1];
+    send({ type: 'perturb', tau: [8 * dx, 8 * dy] });
+    return;
+  }
+  if (authoring && draft) {
+    draft.cur = [mx, my];
+    draw();
+  }
 });
 const endDrag = () => { if (dragging) { dragging = false; send({ type: 'perturb', tau: [0, 0] }); } };
-cv.addEventListener('pointerup', endDrag);
-cv.addEventListener('pointercancel', endDrag);
+
+function endAuthoring() {
+  if (!authoring || !draft) { authoring = false; draft = null; return; }
+  const [ax, ay] = draft.a;
+  const [cx, cy] = draft.cur;
+  const dragDistM = Math.hypot(cx - ax, cy - ay);
+  const minDragM = 3 / PX;               // ~3px, filters accidental micro-drags
+  let c = null;
+
+  if (draft.kind === 'point') {
+    c = { kind: 'point', at: [cx, cy] };
+  } else if (draft.kind === 'line') {
+    if (dragDistM > minDragM) {
+      const d = [(cx - ax) / dragDistM, (cy - ay) / dragDistM];
+      c = { kind: 'line', a: [ax, ay], d };
+    }
+  } else if (draft.kind === 'wall') {
+    if (dragDistM > minDragM) {
+      const t = [(cx - ax) / dragDistM, (cy - ay) / dragDistM];
+      const n1 = [-t[1], t[0]], n2 = [t[1], -t[0]];
+      // default free side: whichever side the arm's current pose sits on
+      // (falls back to the base at the origin if no telemetry yet)
+      const ref = (state && state.pose) ? state.pose : [0, 0];
+      const toRefX = ref[0] - ax, toRefY = ref[1] - ay;
+      const n = (n1[0] * toRefX + n1[1] * toRefY >= 0) ? n1 : n2;
+      c = { kind: 'wall', a: [ax, ay], normal: n };
+    }
+  } else if (draft.kind === 'grid') {
+    const pitchInput = (parseFloat(document.getElementById('grid-pitch').value) || 20) / 1000;
+    const pitch = Math.max(dragDistM > minDragM ? dragDistM : pitchInput, 0.005);
+    c = { kind: 'grid', pitch, origin: [ax, ay] };
+  }
+
+  if (c) {
+    constraints.push(c);
+    sendConstraints();
+    renderConstraintList();
+  }
+  authoring = false;
+  draft = null;
+  draw();
+}
+cv.addEventListener('pointerup', () => { endDrag(); endAuthoring(); });
+cv.addEventListener('pointercancel', () => { endDrag(); authoring = false; draft = null; draw(); });
+
+/* ------------------------------------------------------------------ hotkeys */
+document.addEventListener('keydown', e => {
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.key === 'g' || e.key === 'G') {
+    if (!controller) return;
+    const idx = constraints.findIndex(c => c.kind === 'grid');
+    if (idx >= 0) {
+      constraints.splice(idx, 1);
+      if (selectedIndex === idx) selectedIndex = -1;
+    } else {
+      const pitch = Math.max((parseFloat(document.getElementById('grid-pitch').value) || 20) / 1000, 0.005);
+      constraints.push({ kind: 'grid', pitch, origin: [0, 0] });
+    }
+    sendConstraints();
+    renderConstraintList();
+    draw();
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIndex >= 0) {
+    if (!controller) return;
+    constraints.splice(selectedIndex, 1);
+    selectedIndex = -1;
+    sendConstraints();
+    renderConstraintList();
+    draw();
+    e.preventDefault();
+  }
+});
 
 /* ------------------------------------------------------------------ drawing */
+function drawInfiniteLine(a, d) {
+  const len = Math.hypot(d[0], d[1]) || 1;
+  const ux = d[0] / len, uy = d[1] / len;
+  const big = 10;                        // metres, comfortably bigger than the canvas
+  const p1 = m2p(a[0] - ux * big, a[1] - uy * big);
+  const p2 = m2p(a[0] + ux * big, a[1] + uy * big);
+  ctx.beginPath(); ctx.moveTo(...p1); ctx.lineTo(...p2); ctx.stroke();
+}
+
+function drawWallHatch(a, t, normal) {
+  const len = Math.hypot(t[0], t[1]) || 1;
+  const ux = t[0] / len, uy = t[1] / len;
+  const spacingM = 10 / PX, tickLenM = 8 / PX;
+  const half = REACH * 1.3;
+  const steps = Math.ceil((2 * half) / spacingM);
+  ctx.beginPath();
+  for (let k = -steps; k <= steps; k++) {
+    const s = k * spacingM;
+    const bx = a[0] + ux * s, by = a[1] + uy * s;
+    // ticks point into the blocked side (opposite the free-side normal)
+    const ex = bx - normal[0] * tickLenM, ey = by - normal[1] * tickLenM;
+    const p1 = m2p(bx, by), p2 = m2p(ex, ey);
+    ctx.moveTo(...p1); ctx.lineTo(...p2);
+  }
+  ctx.stroke();
+}
+
+function drawGridDots(pitch, origin) {
+  const iMin = Math.ceil((-REACH - origin[0]) / pitch);
+  const iMax = Math.floor((REACH - origin[0]) / pitch);
+  const jMin = Math.ceil((-REACH - origin[1]) / pitch);
+  const jMax = Math.floor((REACH - origin[1]) / pitch);
+  for (let i = iMin; i <= iMax; i++) {
+    for (let j = jMin; j <= jMax; j++) {
+      const x = origin[0] + i * pitch, y = origin[1] + j * pitch;
+      if (Math.hypot(x, y) > REACH * 1.02) continue;
+      const [px, py] = m2p(x, y);
+      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, TAU); ctx.fill();
+    }
+  }
+}
+
+function drawConstraint(c, selected) {
+  ctx.save();
+  ctx.strokeStyle = selected ? '#ffffff' : '#3aa0d4';
+  ctx.fillStyle = selected ? '#ffffff' : 'rgba(58,160,212,0.55)';
+  ctx.lineWidth = selected ? 2 : 1.25;
+  if (c.kind === 'point') {
+    ctx.fillStyle = selected ? '#ffffff' : '#3aa0d4';
+    const [px, py] = m2p(...c.at);
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, TAU); ctx.fill();
+  } else if (c.kind === 'line') {
+    drawInfiniteLine(c.a, c.d);
+  } else if (c.kind === 'wall') {
+    const t = [-c.normal[1], c.normal[0]];
+    drawInfiniteLine(c.a, t);
+    drawWallHatch(c.a, t, c.normal);
+  } else if (c.kind === 'grid') {
+    drawGridDots(c.pitch, c.origin);
+  }
+  ctx.restore();
+}
+
+function drawDraft(d) {
+  ctx.save();
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = '#8b93a3';
+  ctx.fillStyle = '#8b93a3';
+  if (d.kind === 'point') {
+    const [px, py] = m2p(...d.cur);
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, TAU); ctx.fill();
+  } else if (d.kind === 'line') {
+    const vec = [d.cur[0] - d.a[0], d.cur[1] - d.a[1]];
+    if (Math.hypot(vec[0], vec[1]) > 1e-4) drawInfiniteLine(d.a, vec);
+  } else if (d.kind === 'wall') {
+    const vec = [d.cur[0] - d.a[0], d.cur[1] - d.a[1]];
+    if (Math.hypot(vec[0], vec[1]) > 1e-4) drawInfiniteLine(d.a, vec);
+  } else if (d.kind === 'grid') {
+    const pitchInput = (parseFloat(document.getElementById('grid-pitch').value) || 20) / 1000;
+    const dragDistM = Math.hypot(d.cur[0] - d.a[0], d.cur[1] - d.a[1]);
+    const pitch = Math.max(dragDistM > 3 / PX ? dragDistM : pitchInput, 0.005);
+    drawGridDots(pitch, d.a);
+  }
+  ctx.restore();
+}
+
+function drawConstraints() {
+  constraints.forEach((c, i) => drawConstraint(c, i === selectedIndex));
+  if (authoring && draft) drawDraft(draft);
+}
+
+function drawWorkspace() {
+  if (!state || !state.workspace) return;
+  const { r_min, r_max } = state.workspace;
+  ctx.save();
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = '#4a5268';
+  if (r_max != null) { ctx.beginPath(); ctx.arc(OX, OY, r_max * PX, 0, TAU); ctx.stroke(); }
+  if (r_min != null) { ctx.beginPath(); ctx.arc(OX, OY, r_min * PX, 0, TAU); ctx.stroke(); }
+  ctx.restore();
+}
+
 function draw() {
   ctx.clearRect(0, 0, cv.width, cv.height);
 
   // reach disk
   ctx.strokeStyle = '#1b2130'; ctx.beginPath();
   ctx.arc(OX, OY, REACH * PX, 0, TAU); ctx.stroke();
+
+  drawWorkspace();
+  drawConstraints();
 
   if (!state) return;
   const [q1, q2] = state.q;
@@ -287,11 +628,6 @@ function draw() {
     ctx.beginPath(); ctx.arc(ax, ay, 7, 0, TAU); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(...m2p(...ee)); ctx.lineTo(ax, ay); ctx.stroke();
   }
-  // constraint marker
-  if (constraint) {
-    ctx.fillStyle = '#3aa0d4'; const [cx, cy] = m2p(...constraint.at);
-    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, TAU); ctx.fill();
-  }
 }
 
 /* ------------------------------------------------------------------ panel */
@@ -310,9 +646,19 @@ function panel(s) {
   const i2t = document.getElementById('s-i2t');
   i2t.textContent = s.i2t_frac.map(v => (v * 100).toFixed(0) + '%').join(' / ');
   i2t.className = Math.max(...s.i2t_frac) > 0.5 ? 'warn' : '';
+
+  const trippedEl = document.getElementById('s-tripped');
+  if (s.tripped === undefined) {
+    trippedEl.textContent = '–'; trippedEl.className = '';
+  } else {
+    trippedEl.textContent = s.tripped ? 'yes' : 'no';
+    trippedEl.className = s.tripped ? 'bad' : 'ok';
+  }
+
+  const errors = s.errors || [];
   const err = document.getElementById('s-err');
-  err.textContent = s.errors.length ? s.errors.join(' ') : 'none';
-  err.className = s.errors.length ? 'warn' : '';
+  err.textContent = errors.length ? errors.join(' | ') : 'none';
+  err.className = errors.length ? 'warn' : '';
 
   const st = s.stats;
   document.getElementById('h-rate').textContent = st.rate_hz.toFixed(0) + ' Hz';
@@ -330,6 +676,7 @@ function panel(s) {
   updateControls();
 }
 
+renderConstraintList();
 connect();
 </script>
 </body>
