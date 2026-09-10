@@ -137,6 +137,9 @@ class WebServer:
         self._config: Config = config if config is not None else (
             getattr(runtime, "_cfg", None) or Config()
         )
+        #: the instance the runtime/link/backend actually run on -- calibration
+        #: writes are mirrored into it so they take effect without a restart
+        self._proc_config: Config | None = config if config is not None else getattr(runtime, "_cfg", None)
 
         self._clients: set[web.WebSocketResponse] = set()
         self._controller: web.WebSocketResponse | None = None
@@ -259,6 +262,8 @@ class WebServer:
             fn = getattr(self._rt, "clear_errors", None)
             if callable(fn):
                 fn()
+        elif kind == "set_elbow":
+            self._try(ws, self._rt.set_elbow, msg["mode"])
         elif kind == "set_tuning":
             self._try(ws, self._rt.set_tuning,
                       **{k: v for k, v in msg.items() if k != "type"})
@@ -308,6 +313,23 @@ class WebServer:
         live_path.write_text(json.dumps(merged_live, indent=2))
         self._config = cfg
         return cfg
+
+    _CAL_FIELDS = ("flip", "zero_offset_rad", "q_min_rad", "q_max_rad", "limit_margin_rad")
+
+    def _apply_calibration_live(self, cfg: Config) -> bool:
+        """Mirror the persisted per-motor calibration into the running process
+        (shared Config + CanLink) so no restart is needed. Passive only -- the
+        calibration endpoints already refuse while armed."""
+        proc = self._proc_config
+        if proc is None:
+            return False
+        for live_m, proc_m in zip(cfg.motors, proc.motors):
+            for f in self._CAL_FIELDS:
+                setattr(proc_m, f, getattr(live_m, f))
+        fn = getattr(self._link, "apply_calibration", None)
+        if callable(fn):
+            fn(proc.motors)
+        return True
 
     def _refuse_if_armed(self) -> web.Response | None:
         """409 while the runtime reports closed_loop=True; calibration writes
@@ -375,11 +397,13 @@ class WebServer:
             cfg = self._persist_patch({"motors": motors_patch})
         except Exception as exc:  # noqa: BLE001
             return _json({"error": str(exc)}, status=400)
+        live = self._apply_calibration_live(cfg)
         return _json({
             "motors": [
                 {"node_id": m.node_id, "zero_offset_rad": m.zero_offset_rad}
                 for m in cfg.motors
             ],
+            "restart_required": not live,
         })
 
     async def _api_calibration_limit(self, request: web.Request) -> web.Response:
@@ -408,10 +432,12 @@ class WebServer:
             cfg = self._persist_patch({"motors": motors_patch})
         except Exception as exc:  # noqa: BLE001
             return _json({"error": str(exc)}, status=400)
+        live = self._apply_calibration_live(cfg)
         m = cfg.motors[motor_idx]
         return _json({
             "motor": motor_idx, "node_id": m.node_id,
             "q_min_rad": m.q_min_rad, "q_max_rad": m.q_max_rad,
+            "restart_required": not live,
         })
 
     async def _api_calibration_workspace(self, request: web.Request) -> web.Response:
@@ -482,12 +508,12 @@ class WebServer:
             },
         ]
         try:
-            self._persist_patch({"motors": motors_patch})
+            cfg = self._persist_patch({"motors": motors_patch})
         except Exception as exc:  # noqa: BLE001
             return _json({"error": str(exc)}, status=400)
 
         response["applied"] = True
-        response["restart_required"] = True
+        response["restart_required"] = not self._apply_calibration_live(cfg)
         return _json(response)
 
     # ------------------------------------------------------------------ broadcast
@@ -527,18 +553,19 @@ def _decode_constraints(items: list) -> list:
     out: list = []
     for it in items:
         kind = it.get("kind")
+        snap = it.get("snap_m")
+        snap = None if snap is None else float(snap)
         if kind == "point":
-            out.append(_c.Point(at=np.asarray(it["at"], float)))
+            out.append(_c.Point(at=np.asarray(it["at"], float), snap_m=snap))
         elif kind == "line":
             out.append(_c.Line(a=np.asarray(it["a"], float), d=np.asarray(it["d"], float),
-                               b=_opt_xy(it.get("b"))))
+                               b=_opt_xy(it.get("b")), snap_m=snap))
         elif kind == "wall":
             out.append(_c.Wall(a=np.asarray(it["a"], float),
                                normal=np.asarray(it["normal"], float), b=_opt_xy(it.get("b"))))
         elif kind == "grid":
-            out.append(
-                _c.SnapGrid(pitch=float(it["pitch"]), origin=np.asarray(it["origin"], float))
-            )
+            out.append(_c.SnapGrid(pitch=float(it["pitch"]),
+                                   origin=np.asarray(it["origin"], float), snap_m=snap))
         else:
             log.warning("unknown constraint kind: %r", kind)
     return out

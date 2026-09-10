@@ -404,3 +404,22 @@ def test_enter_closed_loop_arms_when_inside_limits():
         assert lk.axis_errors() == (0, 0)
     finally:
         lk.stop()
+
+
+def test_apply_calibration_takes_effect_without_restart():
+    from panto.config import Config
+
+    cfg = Config.load()
+    link = CanLink(cfg, sim=True)
+    link.start()
+    try:
+        link.wait_for_feedback(timeout=5.0)
+        q0, _ = link.joint_state()
+        for m in cfg.motors:
+            m.zero_offset_rad += 0.1
+        link.apply_calibration(cfg.motors)
+        time.sleep(0.05)                         # next encoder frame re-folds the wrap
+        q1, _ = link.joint_state()
+        assert np.allclose(q1 - q0, [0.1, 0.1], atol=1e-3)
+    finally:
+        link.close()

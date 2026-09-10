@@ -292,7 +292,16 @@ Sent (not broadcast) in response to a failed `engage`, `playback`, or `trace_sha
 
 ### New inbound messages
 
-`engage` (no payload), `trace_shape {shape, size_m, centre:[x,y], speed, laps}`.
+`engage` (no payload), `trace_shape {shape, size_m, centre:[x,y], speed, laps}`
+(`size_m` may be `[w, h]` for a rectangle), `set_tuning {stiffness_n_per_m?,
+wall_stiffness_n_per_m?, force_limit_n?, vel_gain?:[v0,v1], current_cap_a?}`,
+`set_elbow {mode:"up"|"down"|"auto"}`, `clear_errors`. Telemetry `tuning` echoes all of
+these plus `elbow_now` (the branch in use this tick).
+
+Constraint items: `line`/`wall` take an optional second endpoint `b:[x,y]` (finite
+segment; a wall has no surface past its ends); `point`/`line`/`grid` take an optional
+`snap_m` (metres): the constraint is inert until the tip is within that distance
+("snap-to"), always active when absent.
 `record_start` / `record_stop` / `playback {id}` / `set_idle` already existed as
 contract names above but were never dispatched — this is where they land.
 

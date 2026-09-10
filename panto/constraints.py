@@ -41,6 +41,8 @@ class Projection:
     #: For a unilateral one (Wall) the runtime zeroes the force when
     #: ``penetration <= 0`` so the free side stays free.
     unilateral: bool = False
+    #: bilateral snap radius (m): inert until the tip is within it; None = always
+    snap_m: Optional[float] = None
 
 
 class Constraint(Protocol):
@@ -60,11 +62,19 @@ def _clamp_along(t: float, a: np.ndarray, b: np.ndarray, d: np.ndarray) -> float
     return min(max(t, lo), hi)
 
 
+def within_snap(distance: float, snap_m: Optional[float]) -> bool:
+    """Bilateral 'snap-to' gating: no radius means always active; otherwise the
+    constraint is inert until the tip comes within ``snap_m`` of it."""
+    return snap_m is None or distance <= float(snap_m)
+
+
 def is_active(projection: Projection) -> bool:
     """The unilateral gate, factored out: a bilateral term always contributes,
     a unilateral one only once the EE is past the surface. The runtime still
     owns how it *combines* the active terms (sum bilateral pulls, etc.)."""
-    return (not projection.unilateral) or projection.penetration > 0.0
+    if projection.unilateral:
+        return projection.penetration > 0.0
+    return within_snap(projection.penetration, projection.snap_m)
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,7 @@ class Point:
     """Bilateral: hold the EE at a fixed point. Milestone 2 / bring-up."""
 
     at: np.ndarray
+    snap_m: Optional[float] = None
 
     def project(self, pose: np.ndarray) -> Projection:
         pose = np.asarray(pose, dtype=float)
@@ -83,6 +94,7 @@ class Point:
             normal=_unit(delta),          # from pose toward the anchor
             penetration=dist,
             unilateral=False,
+            snap_m=self.snap_m,
         )
 
 
@@ -95,6 +107,7 @@ class Line:
     a: np.ndarray
     d: np.ndarray
     b: Optional[np.ndarray] = None   # second endpoint -> finite segment a..b
+    snap_m: Optional[float] = None
 
     def project(self, pose: np.ndarray) -> Projection:
         pose = np.asarray(pose, dtype=float)
@@ -110,6 +123,7 @@ class Line:
             normal=_unit(delta),
             penetration=float(np.linalg.norm(delta)),
             unilateral=False,
+            snap_m=self.snap_m,
         )
 
 
@@ -280,6 +294,7 @@ class SnapGrid:
 
     pitch: float
     origin: np.ndarray
+    snap_m: Optional[float] = None
 
     def project(self, pose: np.ndarray) -> Projection:
         pose = np.asarray(pose, dtype=float)
@@ -291,6 +306,7 @@ class SnapGrid:
             normal=_unit(delta),
             penetration=float(np.linalg.norm(delta)),
             unilateral=False,
+            snap_m=self.snap_m,
         )
 
 

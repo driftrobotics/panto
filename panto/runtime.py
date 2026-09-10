@@ -60,6 +60,7 @@ _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajecto
 
 _VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
 _CURRENT_CAP_MAX = 2.0  # A; drive current_hard_max is 2.5, 2 A bursts accepted 2026-09-10
+_ELBOW_HYST_RAD = np.radians(3.0)
 
 # Sustained-oscillation guard (user decision 2026-09-10: no K clamp, guard instead).
 _OSC_GUARD_K = 25.0   # N/m: free-air-stable tip stiffness the guard falls back to
@@ -188,6 +189,8 @@ class Runtime:
         self._loop_error: str | None = None
         self._osc_hist: deque = deque()
         self._osc_tripped = False
+        self._elbow_mode = "auto"
+        self._elbow_now = str(config.elbow)
 
         self._tick_listeners: list[Callable[[dict], None]] = []
 
@@ -235,6 +238,29 @@ class Runtime:
 
     def note_closed_loop(self, value: bool) -> None:
         self._closed_loop = bool(value)
+
+    # ------------------------------------------------------------------ elbow branch
+
+    def set_elbow(self, mode: str) -> None:
+        """IK branch policy: "up" / "down" fixed, or "auto" = follow the arm's
+        measured branch each tick (so flipping the elbow through straight in
+        interactive mode never yields mirror-image targets)."""
+        if mode not in ("up", "down", "auto"):
+            raise ValueError(f"elbow mode must be up/down/auto, got {mode!r}")
+        with self._lock:
+            self._elbow_mode = mode
+
+    def _elbow_branch(self, q: np.ndarray) -> str:
+        mode = self._elbow_mode
+        if mode != "auto":
+            self._elbow_now = mode
+            return mode
+        # hysteresis band around straight so a wobble at q2≈0 doesn't flap
+        if q[1] > _ELBOW_HYST_RAD:
+            self._elbow_now = "up"
+        elif q[1] < -_ELBOW_HYST_RAD:
+            self._elbow_now = "down"
+        return self._elbow_now
 
     _TUNING_FIELDS = ("stiffness_n_per_m", "wall_stiffness_n_per_m", "force_limit_n")
 
@@ -293,6 +319,8 @@ class Runtime:
         t = {name: float(getattr(self._cfg.control, name)) for name in self._TUNING_FIELDS}
         t["vel_gain"] = [float(m.vel_gain) for m in self._cfg.motors]
         t["current_cap_a"] = float(max(m.current_soft_max for m in self._cfg.motors))
+        t["elbow"] = self._elbow_mode
+        t["elbow_now"] = self._elbow_now
         return t
 
     # ------------------------------------------------------------------ record
@@ -363,7 +391,7 @@ class Runtime:
         stride = max(1, len(points) // 200)
         for t, p in points[::stride] + points[-1:]:
             try:
-                q = inverse(p, geo, elbow=self._cfg.elbow)
+                q = inverse(p, geo, elbow=self._elbow_now)
             except Unreachable:
                 raise ValueError(f"path leaves reach at t={t:.2f}s: ({p[0]:.3f}, {p[1]:.3f})")
             if min_singular_value(q, geo) < thr:
@@ -610,6 +638,8 @@ class Runtime:
 
         if not entered:
             self._enter_mode(mode)
+        if hasattr(self._backend, "elbow"):
+            self._backend.elbow = self._elbow_branch(q)
 
         # 4-6. per mode
         if mode is Mode.TRANSPARENT:

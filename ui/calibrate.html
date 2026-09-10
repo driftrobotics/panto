@@ -71,7 +71,7 @@
 
   <section>
     <h2>Two-point</h2>
-    <p class="hint">Hold at full extension, capture; then hold folded (collision 2), capture. Preview before applying — applying writes flip, zero offset, and joint limits (q0_max, q1_min) for both motors and requires a restart.</p>
+    <p class="hint">Hold at full extension, capture; then hold folded (collision 2), capture. Preview before applying — applying writes flip, zero offset, and joint limits (q0_max, q1_min) for both motors and takes effect immediately (the arm must be passive).</p>
     <div>
       <button id="tp-btn-ext">Step 1: hold at full extension → Capture</button>
       <span class="hint" id="tp-ext-val">–</span>
@@ -277,7 +277,7 @@ document.getElementById('tp-btn-apply').onclick = async () => {
   tpPreview = null;
   document.getElementById('tp-apply-anyway').checked = false;
   tpRefreshGating();
-  showStatus('applied — restart required.', true);
+  showStatus(r.data.restart_required ? 'applied — restart required.' : 'applied — live, no restart needed.', true);
 };
 
 /* ------------------------------------------------------------ workspace canvas */

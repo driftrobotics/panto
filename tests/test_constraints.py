@@ -303,3 +303,18 @@ def test_finite_line_clamps_to_its_endpoints():
     # direction pointing away from b still clamps to the same segment
     seg2 = Line(a=np.array([0.0, 0.0]), d=np.array([-1.0, 0.0]), b=np.array([0.1, 0.0]))
     assert np.allclose(seg2.project(np.array([0.30, 0.02])).anchor, [0.10, 0.0])
+
+
+# ------------------------------------------------------------------ snap-to
+
+def test_snap_radius_gates_bilateral_constraints():
+    p = Point(at=np.array([0.1, 0.0]), snap_m=0.02)
+    assert not is_active(p.project(np.array([0.15, 0.0])))      # 50 mm away: inert
+    assert is_active(p.project(np.array([0.11, 0.0])))          # 10 mm away: snaps
+    line = Line(a=np.array([0.0, 0.0]), d=np.array([1.0, 0.0]), snap_m=0.005)
+    assert not is_active(line.project(np.array([0.05, 0.01])))
+    assert is_active(line.project(np.array([0.05, 0.004])))
+    grid = SnapGrid(pitch=0.02, origin=np.array([0.0, 0.0]), snap_m=0.003)
+    assert not is_active(grid.project(np.array([0.01, 0.01])))  # dead centre of a cell
+    assert is_active(grid.project(np.array([0.021, 0.0])))
+    assert is_active(Point(at=np.array([0.1, 0.0])).project(np.array([0.3, 0.3])))  # no radius

@@ -747,3 +747,27 @@ def test_set_tuning_current_cap_applies_to_all_motors():
     assert rt.telemetry()["tuning"]["current_cap_a"] == 2.0
     with pytest.raises(ValueError):
         rt.set_tuning(current_cap_a=2.5)
+
+
+def test_elbow_auto_follows_the_measured_branch_with_hysteresis():
+    rt, cfg, link, backend, _ = make()
+    backend.elbow = None
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.12, 0.06])])
+    rt.step(dt=0.005)
+    assert backend.elbow == "up"                       # GOOD_Q has q2 = +1.1
+    link.q = np.array([0.4, -1.1])
+    rt.step(dt=0.005)
+    assert backend.elbow == "down"
+    link.q = np.array([0.4, 0.01])                     # inside the ±3° band: keep
+    rt.step(dt=0.005)
+    assert backend.elbow == "down"
+    assert rt.telemetry()["tuning"]["elbow"] == "auto"
+    assert rt.telemetry()["tuning"]["elbow_now"] == "down"
+
+    rt.set_elbow("up")
+    rt.step(dt=0.005)
+    assert backend.elbow == "up"
+    with pytest.raises(ValueError):
+        rt.set_elbow("sideways")

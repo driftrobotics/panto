@@ -602,6 +602,20 @@ class CanLink:
         ])
         return q, qd
 
+    def apply_calibration(self, motors) -> None:
+        """Adopt new per-motor flip / zero_offset_rad (and limits, read from
+        ``motors`` when the wrap is re-decided) without a restart. Passive use
+        only -- the caller must ensure the axes are IDLE; the next encoder frame
+        re-folds the wrap against the new zero and limits."""
+        with self._lock:
+            for i, m in enumerate(motors[:2]):
+                self._flip[i] = bool(getattr(m, "flip", self._flip[i]))
+                z = getattr(m, "zero_offset_rad", None)
+                if z is not None:
+                    self._zero[i] = float(z)
+                self._wrap_decided[i] = False
+                self._wrap_turns[i] = 0
+
     def raw_turns(self) -> np.ndarray:
         """Uncalibrated encoder position per node, turns (session wrap
         included). Read-only; the calibration UI derives zero offsets from it."""

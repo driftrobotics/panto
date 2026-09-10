@@ -357,7 +357,7 @@ def test_two_point_apply_writes_motors_and_limits(isolated_live_file):
 
     assert status == 200
     assert data["applied"] is True
-    assert data["restart_required"] is True
+    assert data["restart_required"] is False   # applied live to the running process
 
     m0, m1 = data2["motors"][0], data2["motors"][1]
     assert m0["flip"] is True and m1["flip"] is False
@@ -401,3 +401,21 @@ def test_two_point_surfaces_warnings(isolated_live_file):
 
     assert status == 200
     assert any("barely moved" in w for w in data["warnings"])
+
+
+def test_calibration_zero_applies_live_to_process_config_and_link(isolated_live_file):
+    calls = []
+
+    class LiveLink(FakeLink):
+        def apply_calibration(self, motors):
+            calls.append([(m.flip, m.zero_offset_rad) for m in motors])
+
+    cfg = Config()
+    link = LiveLink(raw=(0.4, 2.2))
+    srv, _rt = make_server(link=link, config=cfg)
+    status, data = run_with_client(
+        srv._app, lambda c: _post(c, "/api/calibration/zero", {"q_target_deg": [0.0, 0.0]}))
+    assert status == 200 and data["restart_required"] is False
+    for i, motor in enumerate(cfg.motors):          # the process's own Config was updated
+        assert joint_from_turns(link._raw[i], motor.flip, motor.zero_offset_rad) == pytest.approx(0.0, abs=1e-9)
+    assert calls and calls[-1] == [(m.flip, m.zero_offset_rad) for m in cfg.motors]

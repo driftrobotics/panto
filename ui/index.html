@@ -13,27 +13,49 @@
   body {
     margin:0; background:var(--bg); color:var(--text);
     font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    display:grid; grid-template-columns:minmax(0,1fr) 320px; min-height:100vh;
+    display:grid; grid-template-columns:auto minmax(0,1fr); height:100vh; overflow:hidden;
   }
-  @media (max-width:820px) { body { grid-template-columns:1fr; } }
-  main { display:grid; place-items:start center; padding:24px; gap:12px; align-content:start; }
+  @media (max-width:900px) { body { grid-template-columns:1fr; height:auto; overflow:auto; } }
+  main { display:grid; justify-items:center; align-content:start; padding:12px 16px; gap:8px; }
+  main > * { max-width:min(92vw, calc(100vh - 150px)); }
   canvas {
     touch-action:none; background:#0a0c10; border:1px solid var(--line); border-radius:8px; cursor:crosshair;
-    max-width:min(90vw, 85vh); height:auto;
+    width:min(92vw, calc(100vh - 150px)); height:auto;
   }
-  aside { background:var(--panel); border-left:1px solid var(--line); padding:20px; overflow-y:auto; }
-  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; font-weight:600; }
-  section + section { margin-top:22px; }
+  .bar { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; width:100%; font-size:12px; }
+  .bar button { margin:0; }
+  .bar label { display:inline-flex; align-items:center; gap:4px; margin:0; font-size:12px; }
+  .bar input[type="number"] { width:58px; margin:0; padding:3px 6px; }
+  .bar-title { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:600; }
+  .row { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; margin-bottom:6px; }
+  .row label { display:inline-flex; align-items:center; gap:4px; margin:0; }
+  .row input[type="number"] { width:60px; margin:0; padding:3px 6px; }
+  .row button { margin:0; }
+  dl.compact { grid-template-columns:auto 1fr auto 1fr; column-gap:8px; }
+  dl.compact dd { white-space:nowrap; }
+  dl.compact dd.span { grid-column:2 / span 3; }
+  #feel { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:6px; }
+  #feel button { display:flex; flex-direction:column; align-items:center; margin:0; padding:6px 8px; width:100%; }
+  #feel button small { color:var(--muted); font-size:10px; line-height:1.3; text-align:center; }
+  #feel button[aria-pressed="true"] small { color:var(--text); }
+  #cap { display:flex; gap:6px; margin-bottom:6px; }
+  #cap button { flex:1; margin:0; }
+  aside {
+    background:var(--panel); border-left:1px solid var(--line); padding:12px 16px;
+    height:100vh; overflow-y:auto; columns:240px; column-gap:16px;
+  }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 6px; font-weight:600; }
+  section { break-inside:avoid; margin:0 0 12px; }
   button {
-    display:inline-block; padding:7px 12px; margin:0 4px 4px 0; background:transparent; color:var(--text);
-    border:1px solid var(--line); border-radius:6px; cursor:pointer; font:inherit; font-size:13px;
+    display:inline-block; padding:5px 10px; margin:0 4px 4px 0; background:transparent; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; cursor:pointer; font:inherit; font-size:12px;
   }
   button:hover { border-color:#3a4152; background:#1c212b; }
   button[aria-pressed="true"] { border-color:var(--dot); background:#1a1f33; }
-  dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0; font-variant-numeric:tabular-nums; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:1px 10px; margin:0; font-size:12px; font-variant-numeric:tabular-nums; }
   dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); } dd.ok { color:var(--ok); } dd.bad { color:var(--bad); }
-  .hint { color:var(--muted); font-size:12px; margin:0 0 10px; }
-  #status { font-size:12px; color:var(--muted); }
+  .hint { color:var(--muted); font-size:11px; margin:0 0 6px; }
+  #status { font-size:12px; color:var(--muted); margin-left:auto; }
   #status::before { content:"● "; }
   #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); }
   label { display:block; font-size:13px; color:var(--muted); margin:0 0 8px; }
@@ -63,19 +85,25 @@
 </head>
 <body>
 <main>
+  <div class="bar" id="topbar">
+    <div id="modes"></div>
+    <button id="engage-toggle" disabled>Engage</button>
+    <div id="status" class="dead">connecting…</div>
+  </div>
   <canvas id="view" width="640" height="640"></canvas>
-  <div id="status" class="dead">connecting…</div>
-  <button id="engage-toggle" disabled>Engage</button>
-  <div class="hint">drag with the selected tool to author a constraint · drag from the tip for a "hand" force (sim) · g toggles a default grid · Delete removes the selected constraint · pick Rect (below) to trace a rectangle by dragging</div>
+  <div class="bar" id="trackbar">
+    <span class="bar-title">trails</span>
+    <label><input id="trail-tip-on" type="checkbox"> tip</label>
+    <label><input id="trail-anchor-on" type="checkbox"> anchor</label>
+    <label>smooth <input id="trail-smooth" type="number" min="0" max="0.95" step="0.05" value="0"></label>
+    <label>len <input id="trail-length" type="number" min="1" max="30" step="1" value="10"> s</label>
+    <button id="trail-clear">Clear</button>
+  </div>
+  <div class="hint">drag with the selected tool · drag from the tip = "hand" force (sim) · g = grid · Delete removes the selection · Rect traces a rectangle</div>
 </main>
 <div id="toast"></div>
 
 <aside>
-  <section>
-    <h2>Mode</h2>
-    <div id="modes"></div>
-  </section>
-
   <section>
     <h2>Constraints</h2>
     <div id="tool-palette">
@@ -85,8 +113,10 @@
       <button data-tool="grid">Grid</button>
       <button data-tool="select">Select</button>
     </div>
-    <label>grid pitch <input id="grid-pitch" type="number" min="1" step="1" value="20"> mm</label>
-    <button id="clear-c">Clear all</button>
+    <div class="row">
+      <label>pitch <input id="grid-pitch" type="number" min="1" step="1" value="20"> mm</label>
+      <button id="clear-c">Clear all</button>
+    </div>
     <div id="constraint-list"></div>
   </section>
 
@@ -94,9 +124,8 @@
     <h2>Feel</h2>
     <div id="feel"></div>
     <div id="feel-now" class="hint">–</div>
-    <div class="hint">free-air oscillates above ~25 N/m; hard/harder need 0.8 A in hand (harder isn't stiffer than hard, just oscillates more) — the runtime drops to K25 if the tip oscillates &gt;3 mm for 0.5 s</div>
     <div id="cap"></div>
-    <div class="hint">K sets crispness, the cap sets strength. 2 A only up to K100 — watch I²t; the runtime trips over_torque past the budget.</div>
+    <div class="hint">K = crispness, cap = strength · 2 A only ≤ K100 · guard drops to K25 on a hands-off swing</div>
   </section>
 
   <section>
@@ -110,55 +139,32 @@
 
   <section>
     <h2>Trace shape</h2>
-    <label>shape
+    <div class="row">
       <select id="shape-kind">
         <option value="box">box</option>
         <option value="circle">circle</option>
         <option value="line">line</option>
       </select>
-    </label>
-    <label>size <input id="shape-size" type="number" min="1" step="1" value="40"> mm</label>
-    <label>speed <input id="shape-speed" type="number" min="1" step="1" value="20"> mm/s</label>
+      <label><input id="shape-size" type="number" min="1" step="1" value="40"> mm</label>
+      <label><input id="shape-speed" type="number" min="1" step="1" value="20"> mm/s</label>
+    </div>
     <button id="trace-btn">Trace</button>
-    <button id="tool-rect" data-tool="rect">Rect (drag on canvas)</button>
-    <div class="hint">Rect uses the speed above · drag a corner to the opposite corner on the canvas</div>
-  </section>
-
-  <section>
-    <h2>Track</h2>
-    <label><input id="trail-tip-on" type="checkbox"> tip trail</label>
-    <label><input id="trail-anchor-on" type="checkbox"> anchor trail</label>
-    <label>smoothing <input id="trail-smooth" type="number" min="0" max="0.95" step="0.05" value="0"></label>
-    <label>length <input id="trail-length" type="number" min="1" max="30" step="1" value="10"> s</label>
-    <button id="trail-clear">Clear trails</button>
+    <button id="tool-rect" data-tool="rect">Rect (drag)</button>
   </section>
 
   <section>
     <h2>State</h2>
-    <dl>
-      <dt>closed loop</dt><dd id="s-cl">–</dd>
-      <dt>pose x,y</dt><dd id="s-pose">–</dd>
-      <dt>q1,q2</dt><dd id="s-q">–</dd>
-      <dt>anchor</dt><dd id="s-anchor">–</dd>
-      <dt>force limit</dt><dd id="s-flim">–</dd>
-      <dt>σ_min(J)</dt><dd id="s-sig">–</dd>
-      <dt>currents</dt><dd id="s-cur">–</dd>
-      <dt>I²t</dt><dd id="s-i2t">–</dd>
-      <dt>tripped</dt><dd id="s-tripped">–</dd>
-      <dt>errors</dt><dd id="s-err">–</dd>
+    <dl class="compact">
+      <dt>loop</dt><dd id="s-cl">–</dd>          <dt>rate</dt><dd id="h-rate">–</dd>
+      <dt>pose</dt><dd id="s-pose">–</dd>        <dt>jitter</dt><dd id="h-jit">–</dd>
+      <dt>q</dt><dd id="s-q">–</dd>              <dt>fb age</dt><dd id="h-age">–</dd>
+      <dt>anchor</dt><dd id="s-anchor">–</dd>    <dt>overruns</dt><dd id="h-over">–</dd>
+      <dt>F lim</dt><dd id="s-flim">–</dd>       <dt>tx / rx</dt><dd id="h-txrx">–</dd>
+      <dt>σ_min</dt><dd id="s-sig">–</dd>        <dt>I²t</dt><dd id="s-i2t">–</dd>
+      <dt>currents</dt><dd id="s-cur">–</dd>     <dt>tripped</dt><dd id="s-tripped">–</dd>
+      <dt>errors</dt><dd id="s-err" class="span">–</dd>
     </dl>
     <button id="clear-err">Clear errors</button>
-  </section>
-
-  <section>
-    <h2>Loop health</h2>
-    <dl>
-      <dt>rate</dt><dd id="h-rate">–</dd>
-      <dt>jitter p95</dt><dd id="h-jit">–</dd>
-      <dt>feedback age</dt><dd id="h-age">–</dd>
-      <dt>overruns</dt><dd id="h-over">–</dd>
-      <dt>tx / rx</dt><dd id="h-txrx">–</dd>
-    </dl>
   </section>
 </aside>
 
@@ -475,17 +481,16 @@ const FEEL_NOTE = {
   soft:   '',
   medium: 'hands-off safe',
   hard:   '0.8 A, in hand',
-  harder: '0.8 A, in hand — not stiffer than K100, oscillates more',
+  harder: '0.8 A, in hand · not stiffer, swings more',
 };
 const feelHost = document.getElementById('feel');
 for (const name of Object.keys(FEEL)) {
-  const wrap = document.createElement('span');
-  wrap.style.display = 'inline-flex';
-  wrap.style.flexDirection = 'column';
-  wrap.style.alignItems = 'center';
-  wrap.style.marginRight = '2px';
   const b = document.createElement('button');
-  b.textContent = name; b.dataset.feel = name;
+  b.dataset.feel = name;
+  b.appendChild(document.createTextNode(name));
+  const note = document.createElement('small');
+  note.textContent = FEEL_NOTE[name] || ' ';
+  b.appendChild(note);
   b.onclick = () => {
     const payload = { ...FEEL[name] };
     // 2 A is only safe up to K100 (bench data: 2 A at K200 heats the shoulder
@@ -496,14 +501,7 @@ for (const name of Object.keys(FEEL)) {
     if (capIsHigh && payload.stiffness_n_per_m > 100) payload.current_cap_a = 0.8;
     send({ type: 'set_tuning', ...payload });
   };
-  wrap.appendChild(b);
-  const note = document.createElement('div');
-  note.className = 'hint';
-  note.style.margin = '0 0 4px';
-  note.style.fontSize = '10px';
-  note.textContent = FEEL_NOTE[name];
-  wrap.appendChild(note);
-  feelHost.appendChild(wrap);
+  feelHost.appendChild(b);
 }
 
 /* ------------------------------------------------------------------ current cap */
