@@ -227,3 +227,71 @@ Outbound `state` message, broadcast ~60 Hz (decoupled from control loop):
 Inbound (from the single active controller): `set_mode {mode}`,
 `set_constraints {constraints:[...]}`, `record_start`, `record_stop`,
 `playback {id}`, `set_idle`, `heartbeat`, and sim-only `perturb {tau:[t0,t1]}`.
+
+## Passive/live arming + trajectory record/playback + shape trace (2026-09-10)
+
+Two parallel streams against this frozen interface:
+
+- **Runtime + web** (owns `panto/runtime.py`, `panto/web.py`, their tests) — arming
+  semantics, recording buffer, `trace_shape`.
+- **UI** (owns `ui/index.html`) — engage/passive toggle, record/playback panel,
+  shape panel, against the JSON below only. Does not touch Python.
+
+### Arming (fixes a latent bug: `closed_loop` telemetry never went false)
+
+`Runtime.start()` no longer calls `enter_closed_loop()` — it only brings up the
+link (`start()`, `wait_for_feedback()`) and the control-loop thread. Motors stay
+IDLE (unarmed) until the UI engages. `step()` still runs every tick while
+unarmed: it computes pose/q/telemetry from passive reads and publishes them
+(this **is** the live-tracking feature — backdrive the arm by hand, watch the
+canvas), but calls neither `backend.relax()` nor `backend.apply()`, so nothing
+is ever transmitted toward an IDLE axis.
+
+```python
+def engage(self) -> None:
+    """Commutate both axes. Raises CanLinkError (e.g. outside joint limits) —
+    caller (web.py) catches and reports to the requesting client only."""
+
+def set_idle(self) -> None:
+    """Existing method, now also clears closed_loop — this is 'go passive.'"""
+```
+
+`closed_loop` in telemetry is the armed/passive flag the UI toggles on.
+
+### Recording (in-memory, single slot, id always `"last"` — "simple" per spec)
+
+```python
+def record_start(self) -> None: ...   # begin appending {t, pose, q} every tick
+def record_stop(self) -> dict: ...    # -> {"id": "last", "samples": N, "duration_s": T}
+def playback(self, id: str = "last") -> None: ...  # KeyError if none recorded
+```
+Recording works regardless of armed state (hand-guide the passive arm through a
+path, then engage + play it back). `playback` reuses the existing
+`set_plotter_trajectory` + `Mode.PLOTTER` path verbatim.
+
+Telemetry gains `"recording": bool`, `"recorded_samples": int`.
+
+### Shape trace (reuses `panto/shapes.py` verbatim — box/circle/line only)
+
+```python
+def trace_shape(self, shape: str, size_m: float, centre: tuple[float, float],
+                 speed: float, laps: int = 1) -> None: ...
+```
+Builds a 2-second lead-in ramp from the current pose to `shapes.path_points(...)`'s
+first sample (same technique as `scripts/trace_shape.py`), splices it in front
+time-shifted, feeds the combined list to `set_plotter_trajectory`, switches mode
+to `PLOTTER`. Raises `ValueError` for an unknown shape (`shapes.SHAPES` is the
+source of truth) — web.py reports it the same way as an `engage` failure.
+
+### New outbound message: one-shot error, to the requesting client only
+
+```json
+{ "type": "error", "message": "refusing to arm -- joint(s) outside limits: ..." }
+```
+Sent (not broadcast) in response to a failed `engage`, `playback`, or `trace_shape`.
+
+### New inbound messages
+
+`engage` (no payload), `trace_shape {shape, size_m, centre:[x,y], speed, laps}`.
+`record_start` / `record_stop` / `playback {id}` / `set_idle` already existed as
+contract names above but were never dispatched — this is where they land.

@@ -190,5 +190,23 @@
     "max_pos_gain": 500,
     "notes": "Conservative hover-geometry preset for shoulder-dominant (+y) moves: +y 5 mm step overshoot 1.8 mm, ss 0.47 mm, I2t 0.15 A2s. With a 1 s anchor ramp (vel_limit 5) overshoot 1.2 mm, ss 0.40 mm.",
     "verified": "2026-09-09 step_response-20260909-231526, -231415 (ramped)"
+  },
+  "hover-K25-pj": {
+    "stiffness": 25,
+    "vel_gain": [
+      0.01,
+      0.05
+    ],
+    "vel_limit": 50.0,
+    "current": 0.8,
+    "cap_slope": 0,
+    "cap_min": [
+      0.8,
+      0.8
+    ],
+    "ff_scale": 0,
+    "max_pos_gain": 100000,
+    "notes": "BEST FULL-AUTHORITY POINT, hover geometry 2026-09-10. Per-joint vel_gain: shoulder 0.01 (chatter-free, ring decays in ~0.3 s), elbow 0.05 (elbow rings below 0.02 and goes unstable at 0.002). vel_limit 50 rad/s + max_pos_gain 1e5 remove the position-mode torque plateau (plateau = vel_gain*vel_limit). 5 mm step +y: overshoot 2.2 mm, ss 0.49 mm, settle 1.9 s; +x: ss 0.18 mm, settle 0.56 s. 25 mm box: RMS 1.14 mm @10 mm/s, 1.25 mm @25 mm/s, shoulder 0.2 A RMS. K=50 with the same gains relay-cycles at the 0.8 A cap (linear band too narrow); K=100 is hopeless at 0.8 A regardless of vel_gain.",
+    "verified": "2026-09-10 step_response-20260910-145845 (+y), -145917 (+x); trace_shape-20260910-150117 (10 mm/s), -150134 (25 mm/s)"
   }
 }

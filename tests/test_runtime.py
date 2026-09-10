@@ -111,6 +111,7 @@ def make(**link_kw):
 
 def test_mode_transitions():
     rt, _, _, backend, _ = make()
+    rt.engage()
     assert rt.mode is Mode.TRANSPARENT
     rt.set_mode("interactive")
     assert rt.mode is Mode.INTERACTIVE
@@ -124,6 +125,7 @@ def test_mode_transitions():
 
 def test_transparent_relaxes():
     rt, _, _, backend, _ = make()
+    rt.engage()
     rt.set_mode(Mode.TRANSPARENT)
     rt.step(dt=0.005)
     rt.step(dt=0.005)
@@ -133,6 +135,7 @@ def test_transparent_relaxes():
 
 def test_interactive_point_produces_command():
     rt, cfg, link, backend, _ = make()
+    rt.engage()
     target = np.array([0.12, 0.06])
     rt.set_mode(Mode.INTERACTIVE)
     rt.set_constraints([FakePoint(target)])
@@ -148,6 +151,7 @@ def test_interactive_point_produces_command():
 
 def test_interactive_no_active_constraint_relaxes():
     rt, _, _, backend, _ = make()
+    rt.engage()
     rt.set_mode(Mode.INTERACTIVE)
     rt.set_constraints([FakeWall([0.1, 0.0], [0.0, 1.0], pen=-0.01)])  # free side
     rt.step(dt=0.005)
@@ -157,6 +161,7 @@ def test_interactive_no_active_constraint_relaxes():
 
 def test_wall_and_point_combine_into_one_anchor():
     rt, cfg, _, backend, _ = make()
+    rt.engage()
     pose = forward(GOOD_Q, cfg.geo)
     kw = cfg.control.wall_stiffness_n_per_m
     kp = cfg.control.stiffness_n_per_m
@@ -181,6 +186,7 @@ def test_force_limit_shrinks_near_singularity():
     rt_g, cfg, _, bg, _ = make(q=GOOD_Q)
     rt_s, _, _, bs, _ = make(q=SINGULAR_Q)
     for rt in (rt_g, rt_s):
+        rt.engage()
         rt.set_mode(Mode.INTERACTIVE)
         rt.set_constraints([FakePoint([0.1, 0.05])])
         rt.step(dt=0.005)
@@ -193,6 +199,7 @@ def test_force_limit_shrinks_near_singularity():
 def test_i2t_accumulates_cuts_back_then_recovers():
     # template thermal: i_continuous=0.2 A, budget_a2s=4.0 A²·s
     rt, cfg, link, backend, _ = make(q=GOOD_Q, currents=(0.8, 0.8))
+    rt.engage()
     rt.set_mode(Mode.INTERACTIVE)
     rt.set_constraints([FakePoint([0.1, 0.05])])
 
@@ -220,6 +227,7 @@ def test_i2t_accumulates_cuts_back_then_recovers():
 
 def test_heartbeat_timeout_forces_transparent_and_idles():
     rt, cfg, link, backend, clock = make()
+    rt.engage()
     rt.set_mode(Mode.INTERACTIVE)
     rt.set_constraints([FakePoint([0.1, 0.05])])
     rt.step(dt=0.005)
@@ -229,6 +237,7 @@ def test_heartbeat_timeout_forces_transparent_and_idles():
     rt.step(dt=0.005)
     assert rt.mode is Mode.TRANSPARENT
     assert link.idle_calls > 0
+    assert rt.telemetry()["closed_loop"] is False    # watchdog clears the arm
     n_applied = len(backend.applied)
 
     clock.t += 0.01
@@ -251,7 +260,8 @@ def test_telemetry_matches_schema():
 
     assert set(tel) == {
         "type", "mode", "closed_loop", "pose", "q", "q_dot", "anchor",
-        "currents", "i2t_frac", "force_limit", "sigma_min", "errors", "stats",
+        "currents", "i2t_frac", "force_limit", "sigma_min", "errors",
+        "recording", "recorded_samples", "stats",
     }
     assert tel["type"] == "state"
     assert tel["mode"] == "interactive"
@@ -273,3 +283,94 @@ def test_start_stop_thread_runs():
     finally:
         rt.stop()
     assert backend.relaxed >= 1
+
+
+# ------------------------------------------------------------------ arming
+
+def test_unarmed_step_publishes_but_calls_no_backend_methods():
+    rt, _, _, backend, _ = make()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+    rt.step(dt=0.005)
+
+    assert backend.relaxed == 0
+    assert not backend.applied
+    tel = rt.telemetry()
+    assert tel["closed_loop"] is False
+    assert tel["mode"] == "interactive"        # mode tracked even while unarmed
+
+
+def test_engage_arms_and_step_then_reaches_backend():
+    rt, _, _, backend, _ = make()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+
+    rt.engage()
+    assert rt.telemetry()["closed_loop"] is False  # not published until a step runs
+    rt.step(dt=0.005)
+
+    assert backend.applied
+    assert rt.telemetry()["closed_loop"] is True
+
+
+def test_set_idle_and_watchdog_both_clear_closed_loop():
+    rt, cfg, link, backend, clock = make()
+    rt.engage()
+    rt.step(dt=0.005)
+    assert rt.telemetry()["closed_loop"] is True
+
+    rt.set_idle()
+    rt.step(dt=0.005)
+    assert rt.telemetry()["closed_loop"] is False
+
+    rt.engage()
+    rt.step(dt=0.005)
+    assert rt.telemetry()["closed_loop"] is True
+
+    clock.t = cfg.heartbeat_timeout_s + 1.0
+    rt.step(dt=0.005)
+    assert rt.telemetry()["closed_loop"] is False
+
+
+def test_watchdog_idles_even_when_never_armed():
+    """The heartbeat watchdog runs ahead of the arm-gate, so it still forces
+    TRANSPARENT + idle even if engage() was never called (the point being:
+    losing the UI heartbeat is a safety net independent of arming state)."""
+    rt, cfg, link, _, clock = make()
+    clock.t = cfg.heartbeat_timeout_s + 1.0
+    rt.step(dt=0.005)
+    assert rt.mode is Mode.TRANSPARENT
+    assert link.idle_calls > 0
+    assert rt.telemetry()["closed_loop"] is False
+
+
+# ---------------------------------------------------------------- recording
+
+def test_record_start_stop_and_playback_round_trip():
+    rt, _, link, backend, clock = make()
+    rt.record_start()
+    rt.step(dt=0.005)
+    clock.t += 0.005
+    rt.step(dt=0.005)
+    result = rt.record_stop()
+
+    assert result["id"] == "last"
+    assert result["samples"] == 2
+    assert result["duration_s"] == pytest.approx(0.005)
+
+    rt.playback("last")
+    assert rt.mode is Mode.PLOTTER
+
+
+def test_playback_unknown_id_raises_keyerror():
+    rt, _, _, _, _ = make()
+    with pytest.raises(KeyError):
+        rt.playback("last")
+
+
+# ------------------------------------------------------------- shape trace
+
+def test_trace_shape_bad_name_raises_valueerror():
+    rt, _, _, _, _ = make()
+    with pytest.raises(ValueError):
+        rt.trace_shape("hexagon", 0.02, [0.1, 0.05], 0.01)

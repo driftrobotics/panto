@@ -28,19 +28,34 @@
   button:hover { border-color:#3a4152; background:#1c212b; }
   button[aria-pressed="true"] { border-color:var(--dot); background:#1a1f33; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0; font-variant-numeric:tabular-nums; }
-  dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); }
+  dt { color:var(--muted); } dd { margin:0; text-align:right; } dd.warn { color:var(--warn); } dd.ok { color:var(--ok); }
   .hint { color:var(--muted); font-size:12px; margin:0 0 10px; }
   #status { font-size:12px; color:var(--muted); }
   #status::before { content:"● "; }
   #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); }
+  label { display:block; font-size:13px; color:var(--muted); margin:0 0 8px; }
+  input[type="number"], select {
+    display:inline-block; padding:5px 8px; margin-left:6px; background:var(--bg); color:var(--text);
+    border:1px solid var(--line); border-radius:6px; font:inherit; font-size:13px; width:90px;
+  }
+  select { width:auto; }
+  #toast {
+    position:fixed; top:16px; right:16px; max-width:320px; padding:10px 14px;
+    background:var(--panel); border:1px solid var(--bad); border-radius:6px; color:var(--text);
+    font-size:13px; box-shadow:0 4px 16px rgba(0,0,0,.4); opacity:0; pointer-events:none;
+    transition:opacity .2s ease; z-index:10;
+  }
+  #toast.show { opacity:1; }
 </style>
 </head>
 <body>
 <main>
   <canvas id="view" width="440" height="440"></canvas>
   <div id="status" class="dead">connecting…</div>
+  <button id="engage-toggle" disabled>Engage</button>
   <div class="hint">click to set a hold point · drag from the tip to apply a "hand" force (sim)</div>
 </main>
+<div id="toast"></div>
 
 <aside>
   <section>
@@ -52,6 +67,29 @@
     <h2>Constraint</h2>
     <button id="clear-c">clear</button>
     <span id="c-desc" class="hint">none</span>
+  </section>
+
+  <section>
+    <h2>Record</h2>
+    <button id="rec-start">● Record</button>
+    <button id="rec-stop">■ Stop</button>
+    <div id="rec-status" class="hint">not recording</div>
+    <button id="play-last">▶ Play last</button>
+    <span id="play-hint" class="hint" style="display:none">arm to play back</span>
+  </section>
+
+  <section>
+    <h2>Trace shape</h2>
+    <label>shape
+      <select id="shape-kind">
+        <option value="box">box</option>
+        <option value="circle">circle</option>
+        <option value="line">line</option>
+      </select>
+    </label>
+    <label>size <input id="shape-size" type="number" min="1" step="1" value="40"> mm</label>
+    <label>speed <input id="shape-speed" type="number" min="1" step="1" value="20"> mm/s</label>
+    <button id="trace-btn">Trace</button>
   </section>
 
   <section>
@@ -106,10 +144,21 @@ function connect() {
     if (m.type === 'hello') { controller = m.controller; sim = m.sim; modes = m.modes; renderModes(); }
     else if (m.type === 'role') { controller = m.controller; renderModes(); }
     else if (m.type === 'state') { state = m; draw(); panel(m); }
+    else if (m.type === 'error') { showToast(m.message); }
   };
 }
 const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
 setInterval(() => send({ type: 'heartbeat' }), 1000);
+
+/* ------------------------------------------------------------------ toast */
+let toastTimer = null;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
 
 /* ------------------------------------------------------------------ controls */
 function renderModes() {
@@ -123,12 +172,64 @@ function renderModes() {
     b.onclick = () => send({ type: 'set_mode', mode });
     host.appendChild(b);
   });
+  updateControls();
 }
 document.getElementById('clear-c').onclick = () => {
   constraint = null;
   document.getElementById('c-desc').textContent = 'none';
   send({ type: 'set_constraints', constraints: [] });
 };
+
+/* ------------------------------------------------------------------ engage / passive */
+const engageBtn = document.getElementById('engage-toggle');
+engageBtn.onclick = () => {
+  const armed = !!(state && state.closed_loop);
+  send({ type: armed ? 'set_idle' : 'engage' });
+};
+
+/* ------------------------------------------------------------------ record / playback */
+const recStartBtn = document.getElementById('rec-start');
+const recStopBtn = document.getElementById('rec-stop');
+const playLastBtn = document.getElementById('play-last');
+const recStatusEl = document.getElementById('rec-status');
+const playHintEl = document.getElementById('play-hint');
+recStartBtn.onclick = () => send({ type: 'record_start' });
+recStopBtn.onclick = () => send({ type: 'record_stop' });
+playLastBtn.onclick = () => send({ type: 'playback', id: 'last' });
+
+/* ------------------------------------------------------------------ trace shape */
+const traceBtn = document.getElementById('trace-btn');
+traceBtn.onclick = () => {
+  if (!controller || !state) return;
+  const shape = document.getElementById('shape-kind').value;
+  const size_m = (parseFloat(document.getElementById('shape-size').value) || 0) / 1000;
+  const speed = (parseFloat(document.getElementById('shape-speed').value) || 0) / 1000;
+  send({ type: 'trace_shape', shape, size_m, centre: state.pose, speed, laps: 1 });
+};
+
+/* ------------------------------------------------------------------ shared control gating */
+function updateControls() {
+  const s = state;
+  const armed = !!(s && s.closed_loop);
+  const recording = s ? (s.recording ?? false) : false;
+  const recordedSamples = s ? (s.recorded_samples ?? 0) : 0;
+
+  engageBtn.disabled = !controller;
+  engageBtn.textContent = armed ? 'Go passive' : 'Engage';
+  engageBtn.setAttribute('aria-pressed', armed);
+
+  recStartBtn.disabled = !controller || recording;
+  recStartBtn.setAttribute('aria-pressed', recording);
+  recStopBtn.disabled = !controller || !recording;
+  playLastBtn.disabled = !controller || recordedSamples === 0;
+  playHintEl.style.display = (recordedSamples > 0 && !armed) ? '' : 'none';
+
+  recStatusEl.textContent = recording
+    ? `recording… ${recordedSamples} samples`
+    : (recordedSamples > 0 ? `${recordedSamples} samples recorded` : 'not recording');
+
+  traceBtn.disabled = !controller;
+}
 
 cv.addEventListener('pointerdown', e => {
   const r = cv.getBoundingClientRect();
@@ -197,7 +298,9 @@ function draw() {
 const f2 = a => a.map(v => v.toFixed(2)).join(', ');
 const f3 = a => a.map(v => v.toFixed(3)).join(', ');
 function panel(s) {
-  document.getElementById('s-cl').textContent = s.closed_loop ? 'yes' : 'no';
+  const clEl = document.getElementById('s-cl');
+  clEl.textContent = s.closed_loop ? 'armed' : 'passive';
+  clEl.className = s.closed_loop ? 'ok' : 'warn';
   document.getElementById('s-pose').textContent = f3(s.pose);
   document.getElementById('s-q').textContent = f3(s.q);
   document.getElementById('s-anchor').textContent = s.anchor ? f3(s.anchor) : '–';
@@ -223,6 +326,8 @@ function panel(s) {
 
   document.querySelectorAll('#modes button').forEach(b =>
     b.setAttribute('aria-pressed', b.textContent === s.mode));
+
+  updateControls();
 }
 
 connect();

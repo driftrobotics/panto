@@ -136,10 +136,36 @@ class WebServer:
             self._rt.set_plotter_trajectory(
                 [(float(t), np.asarray(p, float)) for t, p in msg["points"]]
             )
+        elif kind == "engage":
+            self._try(ws, self._rt.engage)
+        elif kind == "record_start":
+            self._rt.record_start()
+        elif kind == "record_stop":
+            self._rt.record_stop()
+        elif kind == "playback":
+            self._try(ws, self._rt.playback, msg.get("id", "last"))
+        elif kind == "trace_shape":
+            self._try(
+                ws,
+                self._rt.trace_shape,
+                msg["shape"],
+                float(msg["size_m"]),
+                msg["centre"],
+                float(msg["speed"]),
+                laps=int(msg.get("laps", 1)),
+            )
         elif kind == "perturb" and self._link is not None:
             self._link.inject_joint_torque(np.asarray(msg["tau"], float))
         else:
             log.debug("ignoring message kind=%r", kind)
+
+    def _try(self, ws: web.WebSocketResponse, fn, *args, **kwargs) -> None:
+        """Call ``fn``; on exception, report to the requesting ``ws`` only
+        (not broadcast) rather than letting it propagate out of ``_dispatch``."""
+        try:
+            fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - reported to the client, not raised
+            asyncio.create_task(ws.send_json({"type": "error", "message": str(exc)}))
 
     def _broadcast_roles(self) -> None:
         for ws in self._clients:

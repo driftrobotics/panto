@@ -28,6 +28,7 @@ from .backends import ImpedanceBackend, ImpedanceCommand
 from .can_link import CanLink
 from .config import Config
 from .kinematics import forward, jacobian, min_singular_value
+from .shapes import SHAPES, path_points
 
 try:  # B's canonical gate; falls back until constraints.py lands in this tree
     from .constraints import is_active as _is_active
@@ -123,6 +124,11 @@ class Runtime:
         self._last_heartbeat = clock()
         self._last_step_t = clock()
 
+        self._recording = False
+        self._record_buf: list[dict] = []
+        self._record_t0 = 0.0
+        self._trajectories: dict[str, list] = {}
+
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tel_lock = threading.Lock()
@@ -162,9 +168,70 @@ class Runtime:
         self.set_mode(Mode.TRANSPARENT)
         self._backend.relax()
         self._idle_motors()
+        with self._lock:
+            self._closed_loop = False
 
     def note_closed_loop(self, value: bool) -> None:
         self._closed_loop = bool(value)
+
+    # ------------------------------------------------------------------ record
+
+    def record_start(self) -> None:
+        """Begin buffering ``{t, pose, q}`` samples once per tick, regardless
+        of armed state -- meant to capture a hand-guided pass while unarmed."""
+        with self._lock:
+            self._record_buf = []
+            self._record_t0 = self._clock()
+            self._recording = True
+
+    def record_stop(self) -> dict:
+        """Stop buffering and stash the take under ``"last"`` for playback."""
+        with self._lock:
+            self._recording = False
+            buf = self._record_buf
+            self._trajectories["last"] = buf
+            samples = len(buf)
+            duration_s = float(buf[-1]["t"]) if buf else 0.0
+        return {"id": "last", "samples": samples, "duration_s": duration_s}
+
+    def playback(self, id: str = "last") -> None:
+        """Replay a previously recorded take via the PLOTTER trajectory
+        follower. Raises ``KeyError`` if ``id`` was never recorded."""
+        with self._lock:
+            buf = self._trajectories[id]
+        points = [(sample["t"], np.asarray(sample["pose"], dtype=float)) for sample in buf]
+        self.set_plotter_trajectory(points)
+        self.set_mode(Mode.PLOTTER)
+
+    # ------------------------------------------------------------------ trace
+
+    def trace_shape(
+        self,
+        shape: str,
+        size_m: float,
+        centre,
+        speed: float,
+        laps: int = 1,
+    ) -> None:
+        """Build a lead-in ramp from the current pose to a shapes.path_points
+        path and feed it to the PLOTTER trajectory follower."""
+        if shape not in SHAPES:
+            raise ValueError(f"unknown shape {shape!r}; expected one of {SHAPES}")
+
+        q, _q_dot = (np.asarray(a, dtype=float) for a in self._link.joint_state())
+        pose0 = forward(q, self._cfg.geo)
+
+        centre_xy = np.asarray(centre, dtype=float)
+        dt = 1.0 / self._cfg.control_rate_hz
+        path = path_points(shape, size_m, centre_xy, speed, dt, laps=laps, start_xy=pose0)
+
+        lead_in_s = 2.0
+        points: list[tuple[float, np.ndarray]] = [(0.0, pose0)]
+        for t, x, y in path:
+            points.append((lead_in_s + float(t), np.array([x, y])))
+
+        self.set_plotter_trajectory(points)
+        self.set_mode(Mode.PLOTTER)
 
     # ------------------------------------------------------------------ props
 
@@ -184,18 +251,29 @@ class Runtime:
 
     def start(self) -> None:
         # Best-effort link bring-up; a minimal fake link needn't provide these.
-        for name in ("start", "wait_for_feedback", "enter_closed_loop"):
+        # Motors stay IDLE until the UI explicitly calls engage() -- do not
+        # commutate on process start.
+        for name in ("start", "wait_for_feedback"):
             fn = getattr(self._link, name, None)
             if callable(fn):
                 fn()
-                if name == "enter_closed_loop":
-                    self._closed_loop = True
         self._last_heartbeat = self._clock()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self.run, name="panto-loop", daemon=True
         )
         self._thread.start()
+
+    def engage(self) -> None:
+        """UI-initiated arm: enter closed-loop control. Exceptions from the
+        link propagate uncaught -- the caller (web.py) reports them."""
+        fn = getattr(self._link, "enter_closed_loop", None)
+        if callable(fn):
+            fn()
+        with self._lock:
+            self._closed_loop = True
+            self._idled = False
+            self._mode_entered = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -288,18 +366,34 @@ class Runtime:
         anchor = pose.copy()
         force_limit = 0.0
 
+        # recording: buffer once per tick, regardless of armed state (meant
+        # to capture a hand-guided pass while unarmed/passive).
+        with self._lock:
+            if self._recording:
+                self._record_buf.append({
+                    "t": self._clock() - self._record_t0,
+                    "pose": pose.tolist(),
+                    "q": q.tolist(),
+                })
+
         # 3. heartbeat watchdog -> force TRANSPARENT + idle
         if self._clock() - self._last_heartbeat > self._cfg.heartbeat_timeout_s:
             self._watchdog_tripped = True
             with self._lock:
                 self._mode = Mode.TRANSPARENT
                 self._mode_entered = True
+                self._closed_loop = False
             self._backend.relax()
             if not self._idled:
                 self._idle_motors()
                 self._idled = True
             self._publish(Mode.TRANSPARENT, pose, q, q_dot, anchor, currents,
                           force_limit, sigma)
+            return
+
+        # unarmed: publish telemetry only, no backend calls at all.
+        if not self._closed_loop:
+            self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma)
             return
 
         if not entered:
@@ -451,6 +545,8 @@ class Runtime:
             "force_limit": 0.0,
             "sigma_min": 0.0,
             "errors": [],
+            "recording": False,
+            "recorded_samples": 0,
             "stats": {
                 "rate_hz": 0.0, "jitter_p95_ms": 0.0, "feedback_age_ms": 0.0,
                 "overruns": 0, "tx": 0, "rx": 0,
@@ -472,6 +568,8 @@ class Runtime:
             "force_limit": float(force_limit),
             "sigma_min": float(sigma),
             "errors": self._errors(),
+            "recording": bool(self._recording),
+            "recorded_samples": len(self._record_buf),
             "stats": {
                 "rate_hz": self._stats.rate_hz,
                 "jitter_p95_ms": self._stats.jitter_p95_ms,
