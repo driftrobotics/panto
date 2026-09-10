@@ -94,7 +94,9 @@
     <h2>Feel</h2>
     <div id="feel"></div>
     <div id="feel-now" class="hint">–</div>
-    <div class="hint">free-air oscillates above ~25 N/m; hard/harder need a hand on the handle and are unverified since the 2026-09-09 rework — the runtime drops to K25 if the tip oscillates &gt;3 mm for 0.5 s</div>
+    <div class="hint">free-air oscillates above ~25 N/m; hard/harder need 0.8 A in hand (harder isn't stiffer than hard, just oscillates more) — the runtime drops to K25 if the tip oscillates &gt;3 mm for 0.5 s</div>
+    <div id="cap"></div>
+    <div class="hint">K sets crispness, the cap sets strength. 2 A only up to K100 — watch I²t; the runtime trips over_torque past the budget.</div>
   </section>
 
   <section>
@@ -177,6 +179,7 @@ let selectedIndex = -1;
 let authoring = false, draft = null;              // {kind, a:[x,y], cur:[x,y]}
 let dragging = false;                             // sim "hand" drag
 let lastRect = null;                              // {size_m:[w,h], centre:[x,y]} of last traced rectangle
+let handleDrag = null;                            // {kind:'a'|'b'|'rotate'|'body', index, ...} — selected wall/line editing
 
 const m2p = (x, y) => [OX + x * PX, OY - y * PX];
 const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
@@ -308,19 +311,53 @@ document.getElementById('clear-c').onclick = () => {
 document.getElementById('clear-err').onclick = () => send({ type: 'clear_errors' });
 
 /* ------------------------------------------------------------------ constraint list panel */
+function unit(v) {
+  const len = Math.hypot(v[0], v[1]) || 1;
+  return [v[0] / len, v[1] / len];
+}
+function angleDegOf(vec) {
+  let deg = Math.atan2(vec[1], vec[0]) * 180 / Math.PI;
+  // segments have no distinguished end, so fold to [0, 180)
+  deg = ((deg % 180) + 180) % 180;
+  return deg;
+}
+function segLenMm(a, b) { return Math.hypot(b[0] - a[0], b[1] - a[1]) * 1000; }
+
 function describeConstraint(c) {
   switch (c.kind) {
     case 'point':
       return `point (${c.at[0].toFixed(3)}, ${c.at[1].toFixed(3)})`;
-    case 'line':
-      return `line a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)}) d=(${c.d[0].toFixed(2)}, ${c.d[1].toFixed(2)})`;
-    case 'wall':
-      return `wall a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)}) n=(${c.normal[0].toFixed(2)}, ${c.normal[1].toFixed(2)})`;
+    case 'line': {
+      let s = `line a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)})`;
+      if (c.b) {
+        const deg = angleDegOf([c.b[0] - c.a[0], c.b[1] - c.a[1]]);
+        s += ` L=${segLenMm(c.a, c.b).toFixed(0)}mm θ=${deg.toFixed(1)}°`;
+      } else {
+        s += ` d=(${c.d[0].toFixed(2)}, ${c.d[1].toFixed(2)}) θ=${angleDegOf(c.d).toFixed(1)}° (∞)`;
+      }
+      return s;
+    }
+    case 'wall': {
+      let s = `wall a=(${c.a[0].toFixed(3)}, ${c.a[1].toFixed(3)}) n=(${c.normal[0].toFixed(2)}, ${c.normal[1].toFixed(2)})`;
+      if (c.b) {
+        const deg = angleDegOf([c.b[0] - c.a[0], c.b[1] - c.a[1]]);
+        s += ` L=${segLenMm(c.a, c.b).toFixed(0)}mm θ=${deg.toFixed(1)}°`;
+      } else {
+        s += ' (∞)';
+      }
+      return s;
+    }
     case 'grid':
       return `grid pitch=${(c.pitch * 1000).toFixed(1)}mm`;
     default:
       return c.kind;
   }
+}
+
+function defaultEndpointFor(c) {
+  const dir = c.kind === 'wall' ? unit([-c.normal[1], c.normal[0]]) : unit(c.d);
+  const len = 0.1;                       // 100mm default when there's no saved endpoint to restore
+  return [c.a[0] + dir[0] * len, c.a[1] + dir[1] * len];
 }
 
 function renderConstraintList() {
@@ -352,6 +389,26 @@ function renderConstraintList() {
         draw();
       };
       row.appendChild(flip);
+    }
+    if (c.kind === 'wall' || c.kind === 'line') {
+      const inf = document.createElement('button');
+      inf.textContent = '∞';
+      inf.title = c.b ? 'make infinite (drop endpoint)' : 'make finite (restore endpoint)';
+      inf.setAttribute('aria-pressed', String(!c.b));
+      inf.onclick = ev => {
+        ev.stopPropagation();
+        if (!controller) return;
+        if (c.b) {
+          c._savedB = c.b;
+          delete c.b;
+        } else {
+          c.b = c._savedB || defaultEndpointFor(c);
+        }
+        sendConstraints();
+        renderConstraintList();
+        draw();
+      };
+      row.appendChild(inf);
     }
     const del = document.createElement('button');
     del.textContent = '×';
@@ -411,23 +468,73 @@ const FEEL = {
   hard:   { stiffness_n_per_m: 100, wall_stiffness_n_per_m: 100, force_limit_n: 3.0 },
   harder: { stiffness_n_per_m: 200, wall_stiffness_n_per_m: 200, force_limit_n: 3.0 },
 };
+// Annotations from the 2026-09-09 stiffness bench + hover re-ID: soft/medium are
+// hands-off safe; hard/harder need 0.8 A in-hand (harder is not stiffer than
+// hard — it just oscillates more, so it's not a "go further" step).
+const FEEL_NOTE = {
+  soft:   '',
+  medium: 'hands-off safe',
+  hard:   '0.8 A, in hand',
+  harder: '0.8 A, in hand — not stiffer than K100, oscillates more',
+};
 const feelHost = document.getElementById('feel');
 for (const name of Object.keys(FEEL)) {
+  const wrap = document.createElement('span');
+  wrap.style.display = 'inline-flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.alignItems = 'center';
+  wrap.style.marginRight = '2px';
   const b = document.createElement('button');
   b.textContent = name; b.dataset.feel = name;
-  b.onclick = () => send({ type: 'set_tuning', ...FEEL[name] });
-  feelHost.appendChild(b);
+  b.onclick = () => {
+    const payload = { ...FEEL[name] };
+    // 2 A is only safe up to K100 (bench data: 2 A at K200 heats the shoulder
+    // for no extra feedback) — if the cap is currently 2 A and this preset is
+    // above K100, pull the cap back down along with the stiffness change.
+    const t = state && state.tuning;
+    const capIsHigh = t && t.current_cap_a != null && t.current_cap_a > 1.0;
+    if (capIsHigh && payload.stiffness_n_per_m > 100) payload.current_cap_a = 0.8;
+    send({ type: 'set_tuning', ...payload });
+  };
+  wrap.appendChild(b);
+  const note = document.createElement('div');
+  note.className = 'hint';
+  note.style.margin = '0 0 4px';
+  note.style.fontSize = '10px';
+  note.textContent = FEEL_NOTE[name];
+  wrap.appendChild(note);
+  feelHost.appendChild(wrap);
 }
+
+/* ------------------------------------------------------------------ current cap */
+const capHost = document.getElementById('cap');
+const CAP = { '0.8 A': 0.8, '2 A burst': 2.0 };
+const capButtons = {};
+for (const label of Object.keys(CAP)) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = () => send({ type: 'set_tuning', current_cap_a: CAP[label] });
+  capHost.appendChild(b);
+  capButtons[label] = b;
+}
+
 function updateFeel() {
   const t = state && state.tuning;
   if (!t) return;
   document.getElementById('feel-now').textContent =
-    `K ${t.stiffness_n_per_m} · wall ${t.wall_stiffness_n_per_m} N/m · ${t.force_limit_n} N`;
+    `K ${t.stiffness_n_per_m} · wall ${t.wall_stiffness_n_per_m} N/m · ${t.force_limit_n} N`
+    + (t.current_cap_a != null ? ` · cap ${t.current_cap_a} A` : '');
   feelHost.querySelectorAll('button').forEach(b => {
     const p = FEEL[b.dataset.feel];
     b.disabled = !controller;
     b.setAttribute('aria-pressed', Object.keys(p).every(k => Math.abs(p[k] - t[k]) < 1e-6));
   });
+  const highK = t.stiffness_n_per_m > 100;
+  const capA = t.current_cap_a;
+  capButtons['0.8 A'].disabled = !controller;
+  capButtons['0.8 A'].setAttribute('aria-pressed', capA != null && Math.abs(capA - 0.8) < 1e-6);
+  capButtons['2 A burst'].disabled = !controller || highK;
+  capButtons['2 A burst'].setAttribute('aria-pressed', capA != null && Math.abs(capA - 2.0) < 1e-6);
 }
 
 function updateControls() {
@@ -488,6 +595,125 @@ function hitTest(mx, my) {
   return best;
 }
 
+/* ------------------------------------------------------------------ wall/line endpoint + rotate handles */
+// Handles only exist for a finite (has b) wall/line: two endpoints (a, b) plus
+// a rotate handle offset ~25px along the normal from the midpoint.
+function segHandlePositions(c) {
+  if (!(c.kind === 'line' || c.kind === 'wall') || !c.b) return null;
+  const a = c.a, b = c.b;
+  const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const normal = c.kind === 'wall' ? c.normal : (() => {
+    const d = unit([b[0] - a[0], b[1] - a[1]]);
+    return [-d[1], d[0]];
+  })();
+  const offM = 25 / PX;
+  const rot = [mid[0] + normal[0] * offM, mid[1] + normal[1] * offM];
+  return { a, b, mid, rot };
+}
+
+function hitTestHandle(c, mx, my) {
+  const h = segHandlePositions(c);
+  if (!h) return null;
+  const thM = 10 / PX;
+  if (Math.hypot(mx - h.a[0], my - h.a[1]) < thM) return 'a';
+  if (Math.hypot(mx - h.b[0], my - h.b[1]) < thM) return 'b';
+  if (Math.hypot(mx - h.rot[0], my - h.rot[1]) < thM) return 'rotate';
+  return null;
+}
+
+// Body hit-test for the currently selected wall/line only (translate-drag).
+// Finite segments are clamped to their a..b span; infinite ones test the
+// whole line, matching how they're drawn.
+function segBodyHit(c, mx, my) {
+  if (!(c.kind === 'line' || c.kind === 'wall')) return false;
+  const thM = 10 / PX;
+  const t = c.kind === 'wall' ? unit([-c.normal[1], c.normal[0]]) : unit(c.d);
+  if (perpDist(mx, my, c.a, t) >= thM) return false;
+  if (c.b) {
+    const segLen = Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1]);
+    const along = (mx - c.a[0]) * t[0] + (my - c.a[1]) * t[1];
+    return along >= -thM && along <= segLen + thM;
+  }
+  return true;
+}
+
+function snapToGridIfHeld(mx, my, shiftKey) {
+  if (!shiftKey) return [mx, my];
+  const g = constraints.find(c => c.kind === 'grid');
+  if (!g) return [mx, my];
+  const gx = g.origin[0] + Math.round((mx - g.origin[0]) / g.pitch) * g.pitch;
+  const gy = g.origin[1] + Math.round((my - g.origin[1]) / g.pitch) * g.pitch;
+  return [gx, gy];
+}
+
+// Recompute a wall's free-side normal from a new tangent, keeping it on the
+// same side it was on before the endpoint move (not just perpendicular).
+function recomputeNormalPreserveSide(oldNormal, tangent) {
+  const n1 = [-tangent[1], tangent[0]];
+  const dot = n1[0] * oldNormal[0] + n1[1] * oldNormal[1];
+  return dot >= 0 ? n1 : [-n1[0], -n1[1]];
+}
+
+const RESEND_MS = 50;             // ~20 Hz throttle for live resends while dragging a handle
+let lastResendAt = 0;
+function throttledResend() {
+  const now = performance.now();
+  if (now - lastResendAt >= RESEND_MS) { lastResendAt = now; sendConstraints(); }
+}
+
+function startHandleDrag(kind, c, index, mx, my) {
+  if (kind === 'rotate') {
+    const mid = [(c.a[0] + c.b[0]) / 2, (c.a[1] + c.b[1]) / 2];
+    const halfLen = Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1]) / 2;
+    return { kind: 'rotate', index, mid, halfLen };
+  }
+  if (kind === 'a' || kind === 'b') {
+    return { kind, index, startNormal: c.normal ? [...c.normal] : null };
+  }
+  // body
+  return {
+    kind: 'body', index, startMouse: [mx, my],
+    startA: [...c.a], startB: c.b ? [...c.b] : null,
+  };
+}
+
+function updateHandleDrag(mx, my, shiftKey) {
+  const hd = handleDrag;
+  const c = constraints[hd.index];
+  if (!c) { handleDrag = null; return; }
+
+  if (hd.kind === 'a' || hd.kind === 'b') {
+    const [nx, ny] = snapToGridIfHeld(mx, my, shiftKey);
+    const other = hd.kind === 'a' ? c.b : c.a;
+    c[hd.kind] = [nx, ny];
+    const tangent = hd.kind === 'a'
+      ? unit([other[0] - nx, other[1] - ny])
+      : unit([nx - other[0], ny - other[1]]);
+    if (c.kind === 'wall') c.normal = recomputeNormalPreserveSide(hd.startNormal, tangent);
+    else c.d = tangent;
+  } else if (hd.kind === 'rotate') {
+    let v = [mx - hd.mid[0], my - hd.mid[1]];
+    const vlen = Math.hypot(v[0], v[1]) || 1e-6;
+    let nv = [v[0] / vlen, v[1] / vlen];
+    if (shiftKey) {
+      const step = 15 * Math.PI / 180;
+      let ang = Math.round(Math.atan2(nv[1], nv[0]) / step) * step;
+      nv = [Math.cos(ang), Math.sin(ang)];
+    }
+    const tangent = [-nv[1], nv[0]];
+    c.a = [hd.mid[0] - tangent[0] * hd.halfLen, hd.mid[1] - tangent[1] * hd.halfLen];
+    c.b = [hd.mid[0] + tangent[0] * hd.halfLen, hd.mid[1] + tangent[1] * hd.halfLen];
+    if (c.kind === 'wall') c.normal = nv; else c.d = tangent;
+  } else if (hd.kind === 'body') {
+    const dx = mx - hd.startMouse[0], dy = my - hd.startMouse[1];
+    c.a = [hd.startA[0] + dx, hd.startA[1] + dy];
+    if (hd.startB) c.b = [hd.startB[0] + dx, hd.startB[1] + dy];
+  }
+  throttledResend();
+  renderConstraintList();
+  draw();
+}
+
 cv.addEventListener('pointerdown', e => {
   const r = cv.getBoundingClientRect();
   const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
@@ -495,6 +721,25 @@ cv.addEventListener('pointerdown', e => {
     dragging = true; cv.setPointerCapture(e.pointerId); return;
   }
   if (!controller) return;
+
+  // handles > body > other items: a selected wall/line's own handles/body take
+  // priority over reselecting or authoring, regardless of the active tool.
+  if (selectedIndex >= 0 && constraints[selectedIndex]) {
+    const c = constraints[selectedIndex];
+    if (c.kind === 'wall' || c.kind === 'line') {
+      const h = hitTestHandle(c, mx, my);
+      if (h) {
+        handleDrag = startHandleDrag(h, c, selectedIndex, mx, my);
+        cv.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (segBodyHit(c, mx, my)) {
+        handleDrag = startHandleDrag('body', c, selectedIndex, mx, my);
+        cv.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+  }
 
   if (activeTool === 'select') {
     selectedIndex = hitTest(mx, my);
@@ -519,12 +764,23 @@ cv.addEventListener('pointermove', e => {
     send({ type: 'perturb', tau: [8 * dx, 8 * dy] });
     return;
   }
+  if (handleDrag) {
+    updateHandleDrag(mx, my, e.shiftKey);
+    return;
+  }
   if (authoring && draft) {
     draft.cur = [mx, my];
     draw();
   }
 });
 const endDrag = () => { if (dragging) { dragging = false; send({ type: 'perturb', tau: [0, 0] }); } };
+const endHandleDrag = () => {
+  if (!handleDrag) return;
+  handleDrag = null;
+  sendConstraints();               // guaranteed final resend on release
+  renderConstraintList();
+  draw();
+};
 
 function endAuthoring() {
   if (!authoring || !draft) { authoring = false; draft = null; return; }
@@ -539,7 +795,8 @@ function endAuthoring() {
   } else if (draft.kind === 'line') {
     if (dragDistM > minDragM) {
       const d = [(cx - ax) / dragDistM, (cy - ay) / dragDistM];
-      c = { kind: 'line', a: [ax, ay], d };
+      // finite from the start: b is the drag's release point (toggle ∞ to drop it)
+      c = { kind: 'line', a: [ax, ay], d, b: [cx, cy] };
     }
   } else if (draft.kind === 'wall') {
     if (dragDistM > minDragM) {
@@ -550,7 +807,8 @@ function endAuthoring() {
       const ref = (state && state.pose) ? state.pose : [0, 0];
       const toRefX = ref[0] - ax, toRefY = ref[1] - ay;
       const n = (n1[0] * toRefX + n1[1] * toRefY >= 0) ? n1 : n2;
-      c = { kind: 'wall', a: [ax, ay], normal: n };
+      // finite from the start: b is the drag's release point (toggle ∞ to drop it)
+      c = { kind: 'wall', a: [ax, ay], normal: n, b: [cx, cy] };
     }
   } else if (draft.kind === 'grid') {
     const pitchInput = (parseFloat(document.getElementById('grid-pitch').value) || 20) / 1000;
@@ -575,8 +833,8 @@ function endAuthoring() {
   draft = null;
   draw();
 }
-cv.addEventListener('pointerup', () => { endDrag(); endAuthoring(); });
-cv.addEventListener('pointercancel', () => { endDrag(); authoring = false; draft = null; draw(); });
+cv.addEventListener('pointerup', () => { endDrag(); endHandleDrag(); endAuthoring(); });
+cv.addEventListener('pointercancel', () => { endDrag(); handleDrag = null; authoring = false; draft = null; draw(); });
 
 /* ------------------------------------------------------------------ hotkeys */
 document.addEventListener('keydown', e => {
@@ -616,22 +874,41 @@ function drawInfiniteLine(a, d) {
   ctx.beginPath(); ctx.moveTo(...p1); ctx.lineTo(...p2); ctx.stroke();
 }
 
-function drawWallHatch(a, t, normal) {
+// segLen == null: infinite wall, ticks symmetric about `a` across the canvas
+// (as before). segLen given: finite wall, ticks run from `a` to `a + t*segLen`
+// only (the a..b span), following the (possibly rotated) tangent/normal.
+function drawWallHatch(a, t, normal, segLen) {
   const len = Math.hypot(t[0], t[1]) || 1;
   const ux = t[0] / len, uy = t[1] / len;
   const spacingM = 10 / PX, tickLenM = 8 / PX;
-  const half = REACH * 1.3;
-  const steps = Math.ceil((2 * half) / spacingM);
   ctx.beginPath();
-  for (let k = -steps; k <= steps; k++) {
-    const s = k * spacingM;
-    const bx = a[0] + ux * s, by = a[1] + uy * s;
-    // ticks point into the blocked side (opposite the free-side normal)
-    const ex = bx - normal[0] * tickLenM, ey = by - normal[1] * tickLenM;
-    const p1 = m2p(bx, by), p2 = m2p(ex, ey);
-    ctx.moveTo(...p1); ctx.lineTo(...p2);
+  if (segLen == null) {
+    const half = REACH * 1.3;
+    const steps = Math.ceil((2 * half) / spacingM);
+    for (let k = -steps; k <= steps; k++) {
+      const s = k * spacingM;
+      const bx = a[0] + ux * s, by = a[1] + uy * s;
+      // ticks point into the blocked side (opposite the free-side normal)
+      const ex = bx - normal[0] * tickLenM, ey = by - normal[1] * tickLenM;
+      const p1 = m2p(bx, by), p2 = m2p(ex, ey);
+      ctx.moveTo(...p1); ctx.lineTo(...p2);
+    }
+  } else {
+    const steps = Math.floor(segLen / spacingM);
+    for (let k = 0; k <= steps; k++) {
+      const s = k * spacingM;
+      const bx = a[0] + ux * s, by = a[1] + uy * s;
+      const ex = bx - normal[0] * tickLenM, ey = by - normal[1] * tickLenM;
+      const p1 = m2p(bx, by), p2 = m2p(ex, ey);
+      ctx.moveTo(...p1); ctx.lineTo(...p2);
+    }
   }
   ctx.stroke();
+}
+
+function drawFiniteSegment(a, b) {
+  const p1 = m2p(a[0], a[1]), p2 = m2p(b[0], b[1]);
+  ctx.beginPath(); ctx.moveTo(...p1); ctx.lineTo(...p2); ctx.stroke();
 }
 
 function drawGridDots(pitch, origin) {
@@ -659,11 +936,18 @@ function drawConstraint(c, selected) {
     const [px, py] = m2p(...c.at);
     ctx.beginPath(); ctx.arc(px, py, 5, 0, TAU); ctx.fill();
   } else if (c.kind === 'line') {
-    drawInfiniteLine(c.a, c.d);
+    if (c.b) drawFiniteSegment(c.a, c.b);
+    else drawInfiniteLine(c.a, c.d);
   } else if (c.kind === 'wall') {
-    const t = [-c.normal[1], c.normal[0]];
-    drawInfiniteLine(c.a, t);
-    drawWallHatch(c.a, t, c.normal);
+    if (c.b) {
+      const t = unit([c.b[0] - c.a[0], c.b[1] - c.a[1]]);
+      drawFiniteSegment(c.a, c.b);
+      drawWallHatch(c.a, t, c.normal, Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1]));
+    } else {
+      const t = [-c.normal[1], c.normal[0]];
+      drawInfiniteLine(c.a, t);
+      drawWallHatch(c.a, t, c.normal, null);
+    }
   } else if (c.kind === 'grid') {
     drawGridDots(c.pitch, c.origin);
   }
@@ -739,6 +1023,32 @@ function drawConstraints() {
   if (authoring && draft) drawDraft(draft);
 }
 
+// Endpoint + rotate handles, drawn only for the selected wall/line (and only
+// once it's finite — an infinite one has no b/midpoint to hang them off).
+function drawSelectedHandles() {
+  if (selectedIndex < 0) return;
+  const c = constraints[selectedIndex];
+  if (!c) return;
+  const h = segHandlePositions(c);
+  if (!h) return;
+  ctx.save();
+  ctx.setLineDash([2, 2]);
+  ctx.strokeStyle = 'rgba(255,204,51,0.7)';
+  ctx.lineWidth = 1;
+  const [mpx, mpy] = m2p(h.mid[0], h.mid[1]);
+  const [rpx, rpy] = m2p(h.rot[0], h.rot[1]);
+  ctx.beginPath(); ctx.moveTo(mpx, mpy); ctx.lineTo(rpx, rpy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#ffcc33';
+  ctx.strokeStyle = '#00000090';
+  ctx.lineWidth = 1.5;
+  for (const p of [h.a, h.b, h.rot]) {
+    const [px, py] = m2p(p[0], p[1]);
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, TAU); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawWorkspace() {
   if (!state || !state.workspace) return;
   const { r_min, r_max } = state.workspace;
@@ -759,6 +1069,7 @@ function draw() {
 
   drawWorkspace();
   drawConstraints();
+  drawSelectedHandles();
   drawLastRect();
   if (tipTrailOn) drawTrail(tipTrail, '80,100,200');
   if (anchorTrailOn) drawTrail(anchorTrail, '58,160,212');
