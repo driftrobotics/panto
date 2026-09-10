@@ -97,6 +97,11 @@ async def run(url: str, passive: bool, perturb: float) -> None:
             s = await c.latest()
             sim = bool(c.hello and c.hello.get("sim"))
             print(f"connected: controller={c.hello and c.hello['controller']} sim={sim}")
+            if c.hello and not c.hello["controller"]:
+                # A browser tab holds the controller role; spectator intents are
+                # dropped silently, so take it (the tab can take it back).
+                await c.send(type="take_control")
+                print("  took control from the current controller")
             check(s["closed_loop"] is False, "starts unarmed (no auto-commutate)")
             check(s["stats"]["rate_hz"] > 0, f"loop running at {s['stats']['rate_hz']:.0f} Hz while unarmed")
 
@@ -175,7 +180,8 @@ async def run(url: str, passive: bool, perturb: float) -> None:
 
             await c.send(type="trace_shape", shape="box", size_m=0.4, centre=s["pose"], speed=0.03)
             err = await c.pop_error()
-            check(err is not None and "reach" in err, f"oversize box rejected: {err!r}")
+            check(err is not None and ("reach" in err or "singularity" in err),
+                  f"oversize box rejected: {err!r}")
             s = await c.latest()
             check(s["stats"]["rate_hz"] > 0 and s["mode"] == "plotter", "loop alive after rejection")
 

@@ -175,6 +175,7 @@ class Runtime:
         # already applies every tick)
         self._tripped = False
         self._trip_idled = False
+        self._loop_error: str | None = None
 
         self._tick_listeners: list[Callable[[dict], None]] = []
 
@@ -249,7 +250,8 @@ class Runtime:
         with self._lock:
             buf = self._trajectories[id]
         points = [(float(s["t"]), np.asarray(s["pose"], dtype=float)) for s in buf]
-        self._follow(points)
+        # Recorded poses are reachable by construction -- no reach/sigma check.
+        self._follow(points, validate=False)
 
     # ------------------------------------------------------------------ trace
 
@@ -273,10 +275,19 @@ class Runtime:
         q, _ = (np.asarray(a, dtype=float) for a in self._link.joint_state())
         return forward(q, self._cfg.geo)
 
-    def _follow(self, points: list[tuple[float, np.ndarray]]) -> None:
-        # Validate up front: an Unreachable raised mid-flight would kill the loop.
+    def _follow(self, points: list[tuple[float, np.ndarray]], *, validate: bool = True) -> None:
+        if validate:
+            self._validate_path(points)
+        # An instantaneous anchor step saturates the position loop into a relay
+        # cycle (2026-09-04), so every trajectory gets a ramp from the current pose.
+        pose0 = self._current_pose()
+        ramped = [(0.0, pose0)] + [(_LEAD_IN_S + t, p) for t, p in points]
+        self.set_plotter_trajectory(ramped)
+        self.set_mode(Mode.PLOTTER)
+
+    def _validate_path(self, points: list[tuple[float, np.ndarray]]) -> None:
         # Strided (paths are smooth) -- a full per-point IK+SVD pass over a long
-        # take hogs the GIL long enough to overrun the control loop.
+        # path hogs the GIL long enough to overrun the control loop.
         geo, thr = self._cfg.geo, self._cfg.sigma_min_threshold
         stride = max(1, len(points) // 200)
         for t, p in points[::stride] + points[-1:]:
@@ -288,12 +299,6 @@ class Runtime:
                 raise ValueError(
                     f"path too close to a singularity at t={t:.2f}s: ({p[0]:.3f}, {p[1]:.3f})"
                 )
-        # An instantaneous anchor step saturates the position loop into a relay
-        # cycle (2026-09-04), so every trajectory gets a ramp from the current pose.
-        pose0 = self._current_pose()
-        ramped = [(0.0, pose0)] + [(_LEAD_IN_S + t, p) for t, p in points]
-        self.set_plotter_trajectory(ramped)
-        self.set_mode(Mode.PLOTTER)
 
     # ------------------------------------------------------------------ props
 
@@ -332,6 +337,8 @@ class Runtime:
         set; call ``clear_errors()`` first."""
         if self._tripped:
             raise RuntimeError("tripped: over_torque")
+        if self._loop_error:
+            raise RuntimeError(f"clear errors first: {self._loop_error}")
         # Same order as the bring-up scripts: limits + controller mode, park the
         # anchor on the current angle at zero gain, *then* commutate -- entering
         # closed loop against a stale input_pos lunges toward it.
@@ -356,6 +363,7 @@ class Runtime:
         with self._lock:
             self._tripped = False
             self._trip_idled = False
+            self._loop_error = None
         clear = getattr(self._link, "clear_errors", None)
         if callable(clear):
             for m in self._cfg.motors:
@@ -399,10 +407,16 @@ class Runtime:
 
             try:
                 self.step(dt)
-            except Exception:  # noqa: BLE001 - a loop crash must idle the drives
+            except Exception as exc:  # noqa: BLE001
+                # A haptic device must never be left with a dead supervisor:
+                # idle the drives, go passive, keep ticking (telemetry only).
+                log.exception("control loop error; drives idled")
                 self._backend.relax()
                 self._idle_motors()
-                raise
+                with self._lock:
+                    self._closed_loop = False
+                    self._mode = Mode.TRANSPARENT
+                    self._loop_error = f"loop:{type(exc).__name__}: {exc}"[:120]
 
             window_iters += 1
             if now - window_start >= 1.0:
@@ -672,6 +686,8 @@ class Runtime:
         workspace state -- always in this order regardless of the order the
         conditions were detected in, so telemetry ordering is deterministic."""
         errs = self._drive_errors()
+        if self._loop_error:
+            errs.append(self._loop_error)
         if self._tripped:
             errs.append("over_torque")
         if unsolvable:

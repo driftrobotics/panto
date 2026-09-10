@@ -391,6 +391,52 @@ def test_played_back_trajectories_ramp_in_from_the_current_pose():
     assert traj[1][0] == pytest.approx(2.0)
 
 
+def test_loop_exception_idles_goes_passive_and_keeps_ticking():
+    import threading
+    import time
+
+    class BoomBackend(FakeBackend):
+        def apply(self, cmd):
+            raise ZeroDivisionError("boom")
+
+    link = FakeLink()
+    rt = Runtime(Config.load(), link, BoomBackend())
+    rt.note_heartbeat()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+    t = threading.Thread(target=rt.run, daemon=True)
+    t.start()
+    for _ in range(200):
+        tel = rt.telemetry()
+        if any(e.startswith("loop:ZeroDivisionError") for e in tel["errors"]):
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError(f"loop error never surfaced: {rt.telemetry()['errors']}")
+    assert t.is_alive() and tel["closed_loop"] is False and link.idle_calls >= 1
+    with pytest.raises(RuntimeError, match="clear errors first"):
+        rt.engage()
+    rt.clear_errors()
+    for _ in range(200):                     # next passive tick republishes
+        if "loop:ZeroDivisionError" not in " ".join(rt.telemetry()["errors"]):
+            break
+        time.sleep(0.01)
+    rt._stop.set()
+    t.join(timeout=2.0)
+    assert "loop:ZeroDivisionError" not in " ".join(rt.telemetry()["errors"])
+
+
+def test_playback_of_a_take_near_a_singularity_is_not_refused():
+    # Recorded poses were physically reached; only analytic shapes get validated.
+    rt, _, link, _, _ = make(q=SINGULAR_Q)
+    rt.record_start()
+    rt.step(dt=0.005)
+    rt.record_stop()
+    rt.playback("last")
+    assert rt.mode is Mode.PLOTTER
+
+
 def test_engage_parks_the_anchor_before_commutating():
     """Entering closed loop against a stale input_pos lunges toward it, so
     engage() must configure + relax the backend *before* enter_closed_loop."""
