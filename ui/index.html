@@ -27,6 +27,11 @@
   .bar label { display:inline-flex; align-items:center; gap:4px; margin:0; font-size:12px; }
   .bar input[type="number"] { width:58px; margin:0; padding:3px 6px; }
   .bar-title { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; font-weight:600; }
+  /* two explicit columns (not CSS multicol, which overflowed sideways) so the
+     whole panel fits one viewport; the aside still scrolls as a fallback */
+  aside { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; align-content:start; }
+  @media (max-width:900px) { aside { grid-template-columns:1fr; } }
+  .col { min-width:0; }
   .row { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; margin-bottom:6px; }
   .row label { display:inline-flex; align-items:center; gap:4px; margin:0; }
   .row input[type="number"] { width:60px; margin:0; padding:3px 6px; }
@@ -111,6 +116,7 @@
 <div id="toast"></div>
 
 <aside>
+<div class="col">
   <section>
     <h2>Constraints</h2>
     <div id="tool-palette">
@@ -145,6 +151,8 @@
     <div id="elbow-now" class="hint">–</div>
   </section>
 
+</div>
+<div class="col">
   <section>
     <h2>Record</h2>
     <button id="rec-start">● Record</button>
@@ -183,6 +191,7 @@
     </dl>
     <button id="clear-err">Clear errors</button>
   </section>
+</div>
 </aside>
 
 <script>
@@ -1266,9 +1275,11 @@ function panel(s) {
   const clEl = document.getElementById('s-cl');
   clEl.textContent = s.closed_loop ? 'armed' : 'passive';
   clEl.className = s.closed_loop ? 'ok' : 'warn';
-  document.getElementById('s-pose').textContent = f3(s.pose);
-  document.getElementById('s-q').textContent = f3(s.q);
-  document.getElementById('s-anchor').textContent = s.anchor ? f3(s.anchor) : '–';
+  const mm = a => a.map(v => (v * 1e3).toFixed(1)).join(', ') + ' mm';
+  const deg = a => a.map(v => (v * 180 / Math.PI).toFixed(1)).join(', ') + '°';
+  document.getElementById('s-pose').textContent = mm(s.pose);
+  document.getElementById('s-q').textContent = deg(s.q);
+  document.getElementById('s-anchor').textContent = s.anchor ? mm(s.anchor) : '–';
   document.getElementById('s-flim').textContent = s.force_limit.toFixed(2) + ' N';
   document.getElementById('s-sig').textContent = s.sigma_min.toFixed(4);
   document.getElementById('s-cur').textContent = f2(s.currents) + ' A';
