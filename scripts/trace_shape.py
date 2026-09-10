@@ -97,7 +97,7 @@ def main() -> None:
     p.add_argument("--backend", choices=("position", "torque"), default="position",
                    help="impedance backend: position (ODrive position cascade, default) or "
                         "torque (host-side Cartesian impedance, panto.backends.torque.TorqueBackend)")
-    p.add_argument("--preset", type=str, default="step-lin-K10",
+    p.add_argument("--preset", type=str, default="hover-K25-pj",
                    help="named preset from presets.json; supplies any of stiffness/vel-gain/"
                         "vel-limit/current/cap-slope/cap-min/ff-scale/max-pos-gain not given "
                         "explicitly below")
@@ -162,7 +162,7 @@ def main() -> None:
                    "vel_gain": None, "vel_limit": None,
                    "current": 0.8 if args.current is None else args.current,
                    "cap_slope": None, "cap_min": None,
-                   "ff_scale": None, "max_pos_gain": None}
+                   "ff_scale": None, "max_pos_gain": None, "hold_ff": None}
         cap_slope_per_joint = (0.0, 0.0)
         cap_min_per_joint = (0.8, 0.8)
     else:
@@ -174,7 +174,7 @@ def main() -> None:
                 "current": args.current,
                 "cap_slope": parse_per_joint(args.cap_slope) if args.cap_slope is not None else None,
                 "cap_min": parse_per_joint(args.cap_min) if args.cap_min is not None else None,
-                "ff_scale": args.ff_scale, "max_pos_gain": args.max_pos_gain,
+                "ff_scale": args.ff_scale, "max_pos_gain": args.max_pos_gain, "hold_ff": args.hold_ff,
             },
             args.preset,
         )
@@ -220,7 +220,7 @@ def main() -> None:
         log_kwargs.update(vel_gain=resolved["vel_gain"], vel_limit=resolved["vel_limit"],
                           cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
                           ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
-                          hold_ff=args.hold_ff)
+                          hold_ff=resolved["hold_ff"])
     log = RunLogger("trace_shape", interface=config.can.interface, channel=config.can.channel,
                     **log_kwargs)
     link = CanLink(config, sim=args.sim)
@@ -496,7 +496,7 @@ def main() -> None:
             summary_config.update(vel_gain=resolved["vel_gain"], vel_limit=resolved["vel_limit"],
                                   cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
                                   ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
-                          hold_ff=args.hold_ff)
+                          hold_ff=resolved["hold_ff"])
         summary: dict = {"preset": args.preset, "backend": args.backend,
                         "config": summary_config,
                         "aborted": aborted, "abort_reason": abort_reason, "bus_lost": bus_lost,

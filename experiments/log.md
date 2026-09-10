@@ -53,6 +53,27 @@ the touch; no mandatory cooldowns while inside motor spec.
   caps (os 12.8 / 13.8 mm, I2t 9.6 / 14.7 A2s), K100 at 2 A stalls. **Raising
   the cap does not raise the K ceiling** — the earlier "linear band scales
   with cap" reading is falsified; the K25 ceiling is a damping limit.
+- **sysid cogging mode rebuilt** (handoff from the UI session): bounded ramp
+  loop (K_j 0.5 N·m/rad, per-joint vg 0.01/0.05, vel_limit 50, 5°/s, pre-ramp
+  to the sweep start), linear Iq(q) detrend reported as `torsion_a_per_rad`,
+  sweeps with >5 % of samples at the cap are rejected. First bounded runs
+  (`sysid-20260910-152520/152533`) still pinned 36–68 % because the old code
+  stepped the target by the full span; with the pre-ramp
+  (`sysid-20260910-152738` shoulder, `-152801` elbow): shoulder 0 % pinned,
+  **no visible cogging** (ripple < 0.02 A over 68–88°), Iq(q) slope −20 mA/deg
+  going + and −8 mA/deg going − (≈0.25 A hysteresis band = harness friction);
+  elbow flat and clean from −118° to −92° then **bang-bang chatter from −92°
+  to −77° in both directions** (8 % pinned) — a pose-dependent elbow
+  instability not seen in the step tests (those sit near q1 ≈ −104°). Plot
+  `cogging_bounded_0910.png`.
+- Elbow chatter region is elbow-vel_gain-dependent (`sysid-20260910-152918`
+  vg 0.02: 0.1–0.3 % pinned; `-152801` vg 0.05: 8 %; `-152953` vg 0.1: 14 %).
+  Box A/B with hold-ff (`trace_shape-20260910-153056` elbow 0.03: RMS 0.82,
+  max 2.25; `-153117` elbow 0.05: 0.84 / 2.50). **Default preset is now
+  `hover-K25-pj` = K25, vel_gain 0.01/0.03, vel_limit 50, max_pos_gain 1e5,
+  0.8 A, hold_ff 1** (bare-default box `-153413`: RMS 0.82). `hold_ff` is a
+  preset field; step_response/trace_shape/offset_sweep/point_hold/
+  stiffness_bench default to it.
 - Reset paradigm: with no friction the arm drifts after `reset_pose` goes
   IDLE. `step_response --start-at-test-pose` now arms where the arm is, ramps
   the anchor to test_pose (1.5 s + 0.5 s hold), then steps.

@@ -29,7 +29,7 @@ from panto.bench_logic import (
     BenchResult, best_converged, build_grid, parse_summary_line, report_table, should_skip,
 )
 
-DEFAULT_PRESET = "pos-bw300-K100"
+DEFAULT_PRESET = "hover-K25-pj"
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:

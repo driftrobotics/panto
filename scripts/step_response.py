@@ -83,7 +83,7 @@ def main() -> None:
     p.add_argument("--interface")
     p.add_argument("--channel")
     p.add_argument("--config")
-    p.add_argument("--preset", type=str, default=None,
+    p.add_argument("--preset", type=str, default="hover-K25-pj",
                    help="named preset from presets.json (panto.presets); supplies any of "
                         "stiffness/vel-gain/vel-limit/current/cap-slope/cap-min/ff-scale/"
                         "max-pos-gain not given explicitly below")
@@ -146,7 +146,7 @@ def main() -> None:
             "current": args.current,
             "cap_slope": parse_per_joint(args.cap_slope) if args.cap_slope is not None else None,
             "cap_min": parse_per_joint(args.cap_min) if args.cap_min is not None else None,
-            "ff_scale": args.ff_scale, "max_pos_gain": args.max_pos_gain,
+            "ff_scale": args.ff_scale, "max_pos_gain": args.max_pos_gain, "hold_ff": args.hold_ff,
         },
         args.preset,
     )
@@ -181,7 +181,7 @@ def main() -> None:
                     vel_limit=resolved["vel_limit"], current=resolved["current"],
                     cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
                     ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
-                          hold_ff=args.hold_ff,
+                          hold_ff=resolved["hold_ff"],
                     step_mm=args.step_mm, direction=args.dir,
                     anchor_ramp_s=args.anchor_ramp_s, rate=args.rate,
                     joint_limits_deg=format_limits_deg(config.motors))

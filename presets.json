@@ -195,7 +195,7 @@
     "stiffness": 25,
     "vel_gain": [
       0.01,
-      0.05
+      0.03
     ],
     "vel_limit": 50.0,
     "current": 0.8,
@@ -206,7 +206,8 @@
     ],
     "ff_scale": 0,
     "max_pos_gain": 100000,
-    "notes": "BEST FULL-AUTHORITY POINT, hover geometry 2026-09-10. Per-joint vel_gain: shoulder 0.01 (chatter-free, ring decays in ~0.3 s), elbow 0.05 (elbow rings below 0.02 and goes unstable at 0.002). vel_limit 50 rad/s + max_pos_gain 1e5 remove the position-mode torque plateau (plateau = vel_gain*vel_limit). 5 mm step +y: overshoot 2.2 mm, ss 0.49 mm, settle 1.9 s; +x: ss 0.18 mm, settle 0.56 s. 25 mm box: RMS 1.14 mm @10 mm/s, 1.25 mm @25 mm/s, shoulder 0.2 A RMS. K=50 with the same gains relay-cycles at the 0.8 A cap (linear band too narrow); K=100 is hopeless at 0.8 A regardless of vel_gain.",
-    "verified": "2026-09-10 step_response-20260910-145845 (+y), -145917 (+x); trace_shape-20260910-150117 (10 mm/s), -150134 (25 mm/s)"
+    "notes": "DEFAULT PRESET (2026-09-10). Hover geometry, 0.8 A. Per-joint vel_gain shoulder 0.01 / elbow 0.03: shoulder chatters at >=0.1 and rings at 0.005-0.01; elbow rings below 0.02 and has a pose-dependent chatter region (q1 > -92 deg) that scales with its vel_gain (0.1-0.3 % pinned at 0.02, 8 % at 0.05, 14 % at 0.1). vel_limit 50 rad/s + max_pos_gain 1e5 remove the position-mode torque plateau. hold_ff 1 = harness holding-torque feedforward from calibration.json hold_ff_* (fit by scripts/fit_hold_ff.py). 25 mm box @10 mm/s: RMS 0.82 mm, max 2.25 mm (0.84/2.50 with elbow 0.05; 1.10 without hold_ff; 2.7 before the per-joint split). 5 mm step +y: os ~2.5 mm, ss ~0.5 mm, settle ~1.9 s; +x ss 0.18 mm, settle 0.56 s. K=50 relay-cycles at 0.8/1.5/2.0 A with these gains; K=100 hopeless.",
+    "verified": "2026-09-10 trace_shape-20260910-153056 (elbow 0.03, hold_ff 1: rms 0.82), -153117 (elbow 0.05: 0.84), -153413 (bare default preset: 0.82); step_response-20260910-145845/145917/151829",
+    "hold_ff": 1.0
   }
 }

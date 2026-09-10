@@ -34,7 +34,7 @@ _CANDIDATES = (_REPO_ROOT / "presets.json", _REPO_ROOT / "panto" / "presets.json
 #: order). ``cap_min`` is a 2-list [shoulder, elbow]; everything else scalar.
 TUNING_FIELDS = (
     "stiffness", "vel_gain", "vel_limit", "current", "cap_slope", "cap_min",
-    "ff_scale", "max_pos_gain",
+    "ff_scale", "max_pos_gain", "hold_ff",
 )
 
 #: fields whose value may be a scalar (applied to both joints) or a 2-list
@@ -57,6 +57,7 @@ class Preset:
     cap_min: list[float] | None = None
     ff_scale: float | None = None
     max_pos_gain: float | None = None
+    hold_ff: float | None = None            # harness holding-torque feedforward scale (MotorConfig.hold_ff_scale)
     encoder_bandwidth: float | None = None   # informational -- drives are set separately
     drive: dict[str, Any] = field(default_factory=dict)  # informational drive settings
     notes: str = ""
@@ -164,6 +165,8 @@ def apply_to_config(config: Any, resolved: dict[str, Any]) -> None:
             motor.max_pos_gain = resolved["max_pos_gain"]
         if resolved.get("ff_scale") is not None:
             motor.ff_scale = resolved["ff_scale"]
+        if resolved.get("hold_ff") is not None:
+            motor.hold_ff_scale = resolved["hold_ff"]
         if cap_min is not None:
             motor.cap_min_a = cap_min[i]
         if cap_slope is not None:

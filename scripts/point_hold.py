@@ -76,7 +76,7 @@ def main() -> None:
     p.add_argument("--interface")
     p.add_argument("--channel")
     p.add_argument("--config")
-    p.add_argument("--preset", type=str, default=None,
+    p.add_argument("--preset", type=str, default="hover-K25-pj",
                    help="named preset from presets.json; supplies stiffness/current/vel-gain/"
                         "vel-limit/max-pos-gain not given explicitly below")
     p.add_argument("--current", type=float, default=None, help="per-axis current cap, A (default 0.25 or preset)")
