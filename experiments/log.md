@@ -1,0 +1,94 @@
+# panto experiment log
+
+Narrative record of what was tried and learned, newest first. Run names are
+`logs/<script>-<stamp>` on rig-host (`admin@rig-host:~/code/panto/logs`); the
+machine-generated index of every run with its config and metrics is
+`experiments/runs.md` (`python -m scripts.experiment_log --since 2026-09-08 --out experiments/runs.md`
+on rig-host). Plots referenced here live in `experiments/plots/`.
+
+Conventions: tip frame +x along the table edge toward the camera, +y into the
+table, CCW positive. `K` is isotropic tip stiffness N/m; `vg` is ODrive
+`vel_gain` N·m/(turn/s), given as `shoulder/elbow` when split; `vl` is the
+`--vel-limit` flag in joint rad/s (position-mode torque plateau =
+vel_gain × vel_limit/(2π) N·m, so small `vl` is a hidden current cap); cap is the
+per-axis current limit. All currents are amps at the drive; Kt label 0.02235.
+
+## 2026-09-10 — vel_gain decimation, per-joint gains, hold feedforward
+
+Rig: shoulder hovering in free space, harness rerouted (user verified rigid
+coupling at every joint; drop the two-mass hypothesis from 09-09). j0 cool to
+the touch; no mandatory cooldowns while inside motor spec.
+
+- `step_response-20260910-144942/145054` K100 vg0.02/0.01 vl50: 18 mm and
+  28 mm shoulder relay cycles at ±0.8 A, elbow joins once the vel clamp is
+  lifted. **K100 cannot be held linearly at 0.8 A for any vel_gain.**
+  Plot `jerr_K100_vg_down.png`.
+- `145130/145243/145354` K25 vg0.01/0.005/0.002 vl50: shoulder cleanest at
+  0.005–0.01 (±1.5° ring decaying ~0.3 s, no dither); elbow rings at 12 Hz
+  below 0.02 and goes unstable at 0.002 (±5° at cap). Plot
+  `jerr_K25_decimate.png`.
+- `145510/145621/145732` K10: quiet at every vg, ss 0.8–1.1 mm (too soft
+  to hold the harness bias).
+- `145845..150005` per-joint vg 0.01/0.05: **K25 works** (+y os 2.2 mm,
+  ss 0.49; +x ss 0.18, settle 0.56 s); **K50 relay-cycles** even with the
+  split (linear band too narrow at 0.8 A). Plot `jerr_perjoint.png`.
+- `trace_shape-20260910-150117/150134` box 25 mm, K25 vg0.01/0.05 vl50:
+  RMS 1.14 mm @10 mm/s, 1.25 mm @25 mm/s, shoulder 0.2 A RMS (was 2.7 mm).
+  Joint-space trace shows the remaining error is spring sag: θ0 error tracks
+  Iq0 one-for-one (−1.3° at −0.45 A on the far side). Plot
+  `box_k25pj_0910.png`. Preset `hover-K25-pj`.
+- Hold-torque model fit on that box (quasi-static samples, joint frame):
+  shoulder I = −0.539 + 0.0317·q0° + 0.0181·q1° A (resid 0.105 A; q0 alone
+  0.137 A), elbow I = −0.416 + 0.0033·q0° − 0.0016·q1° (resid 0.053 A).
+  Implemented as `hold_ff_*` in calibration.json + `--hold-ff SCALE`
+  (`scripts/fit_hold_ff.py`).
+- **Hold-ff A/B** (`trace_shape-20260910-151351` on / `-151413` off, back to
+  back, K25 vg0.01/0.05): box RMS **0.84 mm vs 1.10 mm**, max 2.5 vs 3.0.
+  Side_1 (the q0~88 deg side) 1.80 → 0.73 mm; side_2 got worse 0.68 → 1.41,
+  i.e. the linear-in-(q0,q1) model over-corrects there — a 2-D map would do
+  better. On 5 mm steps at test pose the ff is a wash (hold current ~0
+  there): +y ss 0.56 → 0.51, overshoot 2.5 → 3.8 (`151303`/`151317`).
+- **Cap ladder with per-joint gains** (`151436` K50 1.5 A, `151450` K50 2 A,
+  `151504` K100 2 A, all +y, hold-ff 1): K50 relay-cycles at 3.4 Hz at BOTH
+  caps (os 12.8 / 13.8 mm, I2t 9.6 / 14.7 A2s), K100 at 2 A stalls. **Raising
+  the cap does not raise the K ceiling** — the earlier "linear band scales
+  with cap" reading is falsified; the K25 ceiling is a damping limit.
+- Reset paradigm: with no friction the arm drifts after `reset_pose` goes
+  IDLE. `step_response --start-at-test-pose` now arms where the arm is, ramps
+  the anchor to test_pose (1.5 s + 0.5 s hold), then steps.
+
+## 2026-09-09 — hover rework, re-ID, chatter threshold
+
+- Stiffness bench (`stiffness_bench-20260909-193350`, `-194714`): stability
+  is pose-dependent; the 09-08 "converged K50–200" reference runs started at
+  (100, 94) mm, not test pose. 2 A cap did not buy stiffness (K200 +y tripped
+  at 2 A where 0.8 A held K400 at (108,100)).
+- Re-ID after rework (`sysid-20260909-2231..2242`): shoulder breakaway
+  0.106/0.007 A (was 0.68/0.47); elbow 0.057/0.004; Iq latency 2–3 ms;
+  elbow J 0.0028 A·s²/rad clean; shoulder chirp amplitude-dependent and
+  damper-like 5–30 Hz (J fit 0.012–0.023, not trustworthy). Cogging mode
+  bang-bangs at the cap → its numbers are dither (`cogging_ramps_0909.png`).
+- With friction gone, vg ≥ 0.1 gives a 41 Hz shoulder chatter at the cap
+  (I2t ~2 A²s/run) independent of K and of encoder bw (150/200 worse than
+  300). vg 0.02–0.05 chatter-free. Idle velocity-estimate noise σ:
+  0.027/0.039 turn/s at bw 300, 0.009/0.012 at 150, 0.005/0.007 at 100.
+  Plots `lin_1mm_0909.png`, `k25_vg02.png`, `jerr_K100_vg_up.png`.
+- vel_limit clamp runs (`231526..231859`) looked clean partly because
+  vl=1 caps the shoulder at 0.36 A (plateau); box with vl=0.5 → 14 mm RMS.
+  Presets `hover-K100-vl1`, `hover-K25-vl1` carry that caveat.
+
+## 2026-09-08 — estimator root cause
+
+- `encoder_bandwidth` 100 added 40–85° of velocity-estimate lag at 10–20 Hz →
+  every limit cycle seen before. 300 saved on both drives. K50/100/200 steps
+  converged (at pose (100,94)); box RMS 2.7–2.8 mm limited by shoulder
+  friction 0.5–0.7 A (harness torsion, pose-dependent). Preset
+  `pos-bw300-K100`, videos `box_K100_bw300.mp4`, `offset_K100_bw300.mp4`.
+
+## 2026-09-04 — bring-up
+
+- disarm_reason=2 on node 0 is a cosmetic firmware quirk; RunLogger artifact
+  fixed. pos_gain bug (config-default vel_gain → ~30× stated K) voided all
+  step results 09-04 evening → 09-08 17:08 UTC. Torque-mode 4 mN·m plateau
+  gotcha (`enable_torque_mode_vel_limit`). Bus raised to 20 V, hard max 2.5 A,
+  session cap 2 A.

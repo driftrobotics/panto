@@ -109,6 +109,9 @@ def main() -> None:
     p.add_argument("--cap-slope", type=str, default=None)
     p.add_argument("--cap-min", type=str, default=None)
     p.add_argument("--ff-scale", type=float, default=None)
+    p.add_argument("--hold-ff", type=float, default=None,
+                   help="override motor.hold_ff_scale (harness holding-torque feedforward, "
+                        "linear in q0,q1 from calibration.json hold_ff_*); 0 off, 1 full")
     p.add_argument("--max-pos-gain", type=float, default=None)
     p.add_argument("--damping", type=float, default=0.0,
                    help="torque backend only: isotropic tip damping B, N.s/m")
@@ -189,6 +192,9 @@ def main() -> None:
     default_vel_gain = drive_defaults(config)
     if args.backend != "torque":
         apply_to_config(config, resolved)
+    if args.hold_ff is not None:
+        for motor in config.motors:
+            motor.hold_ff_scale = args.hold_ff
 
     nodes = [m.node_id for m in config.motors]
     K = resolved["stiffness"] * np.eye(2)
@@ -213,7 +219,8 @@ def main() -> None:
     else:
         log_kwargs.update(vel_gain=resolved["vel_gain"], vel_limit=resolved["vel_limit"],
                           cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
-                          ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"])
+                          ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
+                          hold_ff=args.hold_ff)
     log = RunLogger("trace_shape", interface=config.can.interface, channel=config.can.channel,
                     **log_kwargs)
     link = CanLink(config, sim=args.sim)
@@ -488,7 +495,8 @@ def main() -> None:
         else:
             summary_config.update(vel_gain=resolved["vel_gain"], vel_limit=resolved["vel_limit"],
                                   cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
-                                  ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"])
+                                  ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
+                          hold_ff=args.hold_ff)
         summary: dict = {"preset": args.preset, "backend": args.backend,
                         "config": summary_config,
                         "aborted": aborted, "abort_reason": abort_reason, "bus_lost": bus_lost,

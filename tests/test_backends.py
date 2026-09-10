@@ -599,3 +599,18 @@ def test_torque_relax_resets_slew_state():
     be._last_tau = np.array([1.0, -1.0])
     be.relax()
     assert list(be._last_tau) == [0.0, 0.0]
+
+
+def test_position_hold_ff_off_by_default_and_linear_when_on():
+    cfg = make_config()
+    from panto.backends.position import PositionBackend
+    m = cfg.motors[0]
+    assert PositionBackend._hold_ff(m, np.array([0.5, -1.0])) == 0.0
+    m.hold_ff_const_a = -0.5
+    m.hold_ff_per_deg = (0.03, 0.02)
+    m.hold_ff_scale = 1.0
+    q = np.array([np.radians(80.0), np.radians(-100.0)])
+    expect = m.torque_constant * (-0.5 + 0.03 * 80.0 + 0.02 * -100.0)
+    assert abs(PositionBackend._hold_ff(m, q) - expect) < 1e-12
+    m.hold_ff_scale = 0.5
+    assert abs(PositionBackend._hold_ff(m, q) - 0.5 * expect) < 1e-12

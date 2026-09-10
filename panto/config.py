@@ -88,6 +88,18 @@ class MotorConfig:
     coulomb_neg_nm: float = 0.0        # breakaway torque, -q direction, N.m (positive magnitude)
     ff_scale: float = 0.7
 
+    # --- holding-torque ("torsion spring") feedforward, 2026-09-10. The
+    # harness acts as a spring whose load on each joint is, to first order,
+    # linear in BOTH joint angles (fit on a quasi-static box trace: shoulder
+    # resid 0.105 A with q0+q1 vs 0.137 A with q0 alone). Joint-frame amps:
+    #   I_hold = hold_ff_const_a + hold_ff_per_deg[0]*q0_deg + hold_ff_per_deg[1]*q1_deg
+    # fed forward as hold_ff_scale * torque_constant * I_hold (N.m) on
+    # Set_Input_Pos.Torque_FF. hold_ff_scale 0 = off (default, exact old
+    # behaviour). Fit with scripts/fit_hold_ff.py from a samples.jsonl. ---
+    hold_ff_const_a: float = 0.0
+    hold_ff_per_deg: list = field(default_factory=lambda: [0.0, 0.0])
+    hold_ff_scale: float = 0.0
+
     # --- joint travel limits (2026-09-04: hit a mechanical stop with none
     # configured). Defaults are "unknown, no limiting" -- unset until
     # calibration.json supplies real values for this arm. ---

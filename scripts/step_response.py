@@ -107,6 +107,9 @@ def main() -> None:
                         "0 disables feedforward outright regardless of calibration.json's "
                         "coulomb_pos_nm/coulomb_neg_nm. Default: preset value, else each motor's "
                         "configured value")
+    p.add_argument("--hold-ff", type=float, default=None,
+                   help="override motor.hold_ff_scale (harness holding-torque feedforward, "
+                        "linear in q0,q1 from calibration.json hold_ff_*); 0 off, 1 full")
     p.add_argument("--max-pos-gain", type=float, default=None, help="override motor.max_pos_gain")
     p.add_argument("--step-mm", type=float, required=True, help="anchor step size, mm (magnitude)")
     p.add_argument("--dir", choices=sorted(DIRS), required=True,
@@ -115,6 +118,13 @@ def main() -> None:
                    help="ramp the anchor step/step-back over this many seconds "
                         "(0 = instantaneous step)")
     p.add_argument("--rate", type=float, default=250.0, help="control loop Hz")
+    p.add_argument("--start-at-test-pose", action="store_true",
+                   help="after arming, ramp the anchor from wherever the arm is to config.test_pose "
+                        "over --pre-ramp-s and hold there before the step, so the step starts from "
+                        "test_pose even if the arm drifted after reset_pose went IDLE (no friction "
+                        "since the 2026-09-09 rework). Without it the step starts from the arm's "
+                        "current pose.")
+    p.add_argument("--pre-ramp-s", type=float, default=1.5)
     p.add_argument("--cooldown-s", type=float, default=60.0,
                    help="mandatory idle wait after every run (success OR abort), before exit -- "
                         "thermal cooldown between grid points. Not skippable via 0 by accident: "
@@ -153,6 +163,9 @@ def main() -> None:
         m.current_soft_max = resolved["current"]
     default_vel_gain = drive_defaults(config)
     apply_to_config(config, resolved)
+    if args.hold_ff is not None:
+        for motor in config.motors:
+            motor.hold_ff_scale = args.hold_ff
 
     nodes = [m.node_id for m in config.motors]
     K = resolved["stiffness"] * np.eye(2)
@@ -168,6 +181,7 @@ def main() -> None:
                     vel_limit=resolved["vel_limit"], current=resolved["current"],
                     cap_slope=resolved["cap_slope"], cap_min=list(cap_min_per_joint),
                     ff_scale=resolved["ff_scale"], max_pos_gain=resolved["max_pos_gain"],
+                          hold_ff=args.hold_ff,
                     step_mm=args.step_mm, direction=args.dir,
                     anchor_ramp_s=args.anchor_ramp_s, rate=args.rate,
                     joint_limits_deg=format_limits_deg(config.motors))
@@ -252,9 +266,47 @@ def main() -> None:
         for i, nid in enumerate(nodes):
             link.set_vel_gains(nid, resolved["vel_gain"][i], 0.0)
 
-        anchor0 = pose0.copy()
-        constraint = Point(at=anchor0.copy())
         period = 1.0 / args.rate
+        anchor0 = pose0.copy()
+        if args.start_at_test_pose:
+            # pre-phase: closed-loop ramp to test_pose, then hold 0.5 s. Same
+            # guards as the main loop; not logged into the step analysis rows.
+            pre_total = args.pre_ramp_s + 0.5
+            print(f"  pre-phase: ramp anchor to test_pose over {args.pre_ramp_s:.1f}s + 0.5s hold")
+            log.event(f"pre-phase ramp to test_pose from ({pose0[0]*1e3:.1f},{pose0[1]*1e3:.1f})mm")
+            tp0 = time.monotonic()
+            while True:
+                tp = time.monotonic() - tp0
+                if tp >= pre_total:
+                    break
+                for s in link.node_status():
+                    if s.axis_state != AXIS_STATE_CLOSED_LOOP_CONTROL:
+                        raise DriveDisarmed(f"drive disarmed in pre-phase: node {s.node_id} "
+                                            f"reason={decode_error_flags(s.disarm_reason or 0)}")
+                frac = min(1.0, tp / max(1e-6, args.pre_ramp_s))
+                frac = frac * frac * (3.0 - 2.0 * frac)      # smoothstep
+                anchor_pre = pose0 + frac * (test_pose_xy - pose0)
+                q, qd = link.joint_state()
+                pose = forward(q, config.geo)
+                proj = Point(at=anchor_pre).project(pose)
+                try:
+                    backend.apply(ImpedanceCommand(pose=pose, q=q, qd=qd, anchor=proj.anchor,
+                                                   stiffness=K, force_limit=50.0))
+                except JointLimitViolation as exc:
+                    raise Aborted(f"joint limit violation in pre-phase ({exc})")
+                cur = link.motor_currents()
+                for node_i in (0, 1):
+                    i2t_a2s[node_i] += float(cur[node_i]) ** 2 * period
+                log.sample(t=tp - pre_total, phase="pre_ramp", q=q, qd=qd, pose=pose,
+                          anchor=proj.anchor, currents=cur, sent=backend.last_command or {},
+                          node_status=link.node_status(), feedback_age_ms=link.feedback_age_s() * 1e3)
+                time.sleep(period)
+            q, _ = link.joint_state()
+            pose_now = forward(q, config.geo)
+            print(f"  pre-phase done: pose=({pose_now[0]*1e3:.1f},{pose_now[1]*1e3:.1f})mm, "
+                  f"{np.linalg.norm(pose_now - test_pose_xy)*1e3:.2f}mm from test_pose")
+            anchor0 = test_pose_xy.copy()
+        constraint = Point(at=anchor0.copy())
         t0 = time.monotonic()
         last_phase = None
 

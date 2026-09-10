@@ -119,6 +119,7 @@ class PositionBackend(ImpedanceBackend):
             vel_cap = self._vel_scheduled_cap(motor, qd_i)
             current_cap = min(force_cap, vel_cap)
             tau_ff = self._coulomb_ff(motor, float(q_target[i]) - float(cmd.q[i]))
+            tau_ff += self._hold_ff(motor, cmd.q)
             self._link.set_input_pos(motor.node_id, float(q_target[i]), torque_ff_nm=tau_ff)
             self._link.set_pos_gain(motor.node_id, pos_gain)
             self._link.set_limits(motor.node_id, self.vel_limit_rad_s, current_cap)
@@ -207,6 +208,22 @@ class PositionBackend(ImpedanceBackend):
         cap = cap_max - slope * abs(qd_rad_s)
         cap = min(cap_max, max(cap_min, cap))
         return round(cap / cls.CAP_QUANT_A) * cls.CAP_QUANT_A
+
+    @staticmethod
+    def _hold_ff(motor, q_rad) -> float:
+        """Holding-torque feedforward, joint-frame N.m: the torque the harness
+        spring makes this joint supply just to sit still at the current pose,
+        modelled linear in both joint angles (see MotorConfig.hold_ff_*). Uses
+        the MEASURED q (not the target) so it is a pure bias cancellation, not
+        an extra stiffness. hold_ff_scale 0 -> exactly 0."""
+        scale = float(getattr(motor, "hold_ff_scale", 0.0))
+        if scale == 0.0:
+            return 0.0
+        per_deg = getattr(motor, "hold_ff_per_deg", (0.0, 0.0))
+        q_deg = np.degrees(np.asarray(q_rad, float))
+        i_hold = float(getattr(motor, "hold_ff_const_a", 0.0)) + float(per_deg[0]) * q_deg[0] \
+            + float(per_deg[1]) * q_deg[1]
+        return scale * float(motor.torque_constant) * i_hold
 
     @staticmethod
     def _coulomb_ff(motor, q_err_rad: float) -> float:
