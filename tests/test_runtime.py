@@ -106,6 +106,9 @@ class FakeWall:
 
 def make(**link_kw):
     cfg = Config.load()
+    # The I²t tests reason about these exact numbers; the template's rig
+    # values (0.8 A / 40 A²·s) are deliberately not what's under test.
+    cfg.thermal.i_continuous, cfg.thermal.budget_a2s = 0.2, 4.0
     link = FakeLink(**link_kw)
     backend = FakeBackend()
     clock = Clock()

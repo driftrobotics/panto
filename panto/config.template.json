@@ -8,7 +8,7 @@
       "torque_constant": 0.02235, "current_soft_max": 0.8,
       "vel_gain": 0.0025, "vel_integrator_gain": 0.0, "max_pos_gain": 500.0 }
   ],
-  "thermal": { "i_continuous": 0.2, "budget_a2s": 4.0 },
+  "thermal": { "i_continuous": 0.8, "budget_a2s": 40.0 },
   "can": { "interface": "socketcan", "channel": "can_odrive", "bitrate": 1000000 },
   "control": { "rate_hz": 200.0, "latency_compensation_s": 0.0,
                "stiffness_n_per_m": 25.0, "wall_stiffness_n_per_m": 50.0, "force_limit_n": 2.0 },
