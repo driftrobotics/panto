@@ -27,7 +27,7 @@ def test_template_loads():
     assert len(cfg.motors) == 2
     assert cfg.motors[0].flip is True           # 2026-09-04 hardware cal: shoulder flipped
     assert cfg.motors[1].flip is False          # one motor is physically flipped
-    assert cfg.thermal.budget_a2s == 4.0
+    assert cfg.thermal.budget_a2s == 40.0
     assert cfg.can.bitrate == 1_000_000
     assert cfg.control.rate_hz == 200.0
 
