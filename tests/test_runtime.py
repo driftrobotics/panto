@@ -10,7 +10,7 @@ import pytest
 from panto.backends import ImpedanceCommand
 from panto.config import Config
 from panto.constraints import Projection
-from panto.kinematics import forward
+from panto.kinematics import Unreachable, forward
 from panto.runtime import Mode, Runtime
 
 GOOD_Q = np.array([0.4, 1.1])          # well-conditioned
@@ -24,6 +24,7 @@ class FakeLink:
         self.currents = np.asarray(currents, dtype=float)
         self.age = 0.005
         self.idle_calls = 0
+        self.cleared: list[int] = []
 
     def joint_state(self):
         return self.q.copy(), self.q_dot.copy()
@@ -43,6 +44,9 @@ class FakeLink:
     def set_idle(self, node_id):
         self.idle_calls += 1
 
+    def clear_errors(self, node_id):
+        self.cleared.append(node_id)
+
     def stop(self):
         pass
 
@@ -52,8 +56,11 @@ class FakeBackend:
         self.applied: list[ImpedanceCommand] = []
         self.relaxed = 0
         self.entered = 0
+        self.raise_unreachable = False
 
     def apply(self, cmd):
+        if self.raise_unreachable:
+            raise Unreachable("no IK solution")
         self.applied.append(cmd)
 
     def relax(self):
@@ -261,7 +268,7 @@ def test_telemetry_matches_schema():
     assert set(tel) == {
         "type", "mode", "closed_loop", "pose", "q", "q_dot", "anchor",
         "currents", "i2t_frac", "force_limit", "sigma_min", "errors",
-        "recording", "recorded_samples", "stats",
+        "tripped", "workspace", "recording", "recorded_samples", "stats",
     }
     assert tel["type"] == "state"
     assert tel["mode"] == "interactive"
@@ -271,6 +278,9 @@ def test_telemetry_matches_schema():
     assert tel["stats"]["tx"] == 7 and tel["stats"]["rx"] == 11
     assert len(tel["pose"]) == 2 and len(tel["i2t_frac"]) == 2
     assert tel["errors"] == []
+    assert tel["tripped"] is False
+    assert set(tel["workspace"]) == {"r_min", "r_max"}
+    assert 0.0 <= tel["workspace"]["r_min"] < tel["workspace"]["r_max"]
     assert tel["stats"]["feedback_age_ms"] == pytest.approx(5.0)
 
 
@@ -442,3 +452,150 @@ def test_trace_shape_bad_name_raises_valueerror():
     rt, _, _, _, _ = make()
     with pytest.raises(ValueError):
         rt.trace_shape("hexagon", 0.02, [0.1, 0.05], 0.01)
+
+
+# -------------------------------------------------------- workspace boundary
+
+def test_workspace_boundary_always_active_near_reach_limit_and_not_removable():
+    # SINGULAR_Q's sigma (~6e-4) is well under the default sigma_min_threshold
+    # (0.03) -- outside the reachable/well-conditioned annulus.
+    rt, _, _, backend, _ = make(q=SINGULAR_Q)
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([])  # nothing user-supplied: the boundary alone must engage
+    rt.step(dt=0.005)
+
+    assert backend.applied, "workspace boundary alone should produce a command"
+    assert "workspace" in rt.telemetry()["errors"]
+
+    # set_constraints can't remove it either.
+    rt.set_constraints([FakePoint([0.05, 0.05])])
+    rt.step(dt=0.005)
+    assert "workspace" in rt.telemetry()["errors"]
+
+
+def test_workspace_inactive_for_well_conditioned_pose():
+    rt, _, _, backend, _ = make(q=GOOD_Q)
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([])
+    rt.step(dt=0.005)
+
+    assert not backend.applied
+    assert "workspace" not in rt.telemetry()["errors"]
+
+
+def test_workspace_telemetry_annulus_radii():
+    rt, cfg, _, _, _ = make()
+    tel = rt.telemetry()
+    r_min, r_max = tel["workspace"]["r_min"], tel["workspace"]["r_max"]
+    reach = cfg.geo.l1 + cfg.geo.l2
+    assert 0.0 < r_min < r_max < reach
+
+
+# ------------------------------------------------------------------- I2t trip
+
+def test_i2t_trip_latches_blocks_engage_and_clear_errors_releases():
+    rt, cfg, link, backend, clock = make(q=GOOD_Q, currents=(2.0, 2.0))
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+    rt.step(dt=0.005)
+    assert backend.applied  # rendering fine before the trip
+
+    # (2^2 - 0.2^2) * 1.1 s = 4.356 A^2*s > the template's 4.0 A^2*s budget.
+    rt.step(dt=1.1)
+    tel = rt.telemetry()
+    assert tel["tripped"] is True
+    assert "over_torque" in tel["errors"]
+    assert rt.mode is Mode.TRANSPARENT
+    assert tel["closed_loop"] is False
+    n_applied = len(backend.applied)
+    idled = link.idle_calls
+    assert idled > 0
+
+    rt.step(dt=0.005)  # stays tripped: no new commands, no idle-call spam
+    assert len(backend.applied) == n_applied
+    assert link.idle_calls == idled
+
+    with pytest.raises(RuntimeError, match="tripped: over_torque"):
+        rt.engage()
+    assert rt.telemetry()["closed_loop"] is False
+
+    # Let the accumulator leak back under budget (clear_errors doesn't reset
+    # it -- only the latch): 300 * 0.05s at zero current drains 0.6 A^2*s,
+    # comfortably under the ~0.36 A^2*s the trip overshot by.
+    link.currents = np.zeros(2)
+    for _ in range(300):
+        rt.step(dt=0.05)
+
+    rt.clear_errors()
+    assert link.cleared == [m.node_id for m in cfg.motors]
+
+    rt.set_mode(Mode.INTERACTIVE)  # trip path forced TRANSPARENT while latched
+    rt.engage()
+    rt.step(dt=0.005)  # telemetry only updates on a step -- check it here
+    assert rt.telemetry()["tripped"] is False
+    assert len(backend.applied) > n_applied
+    assert rt.telemetry()["closed_loop"] is True
+
+
+# --------------------------------------------------------------- unsolvable
+
+def test_unsolvable_interactive_relaxes_and_keeps_ticking():
+    rt, _, _, backend, _ = make(q=GOOD_Q)
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+
+    backend.raise_unreachable = True
+    rt.step(dt=0.005)  # backend.apply raises Unreachable -- must not crash the loop
+    assert not backend.applied
+    assert backend.relaxed >= 1
+    tel = rt.telemetry()
+    assert "unsolvable" in tel["errors"]
+    assert rt.mode is Mode.INTERACTIVE  # loop kept ticking, mode unchanged
+
+    backend.raise_unreachable = False
+    rt.step(dt=0.005)  # recovers next tick once the backend can solve again
+    assert backend.applied
+    assert "unsolvable" not in rt.telemetry()["errors"]
+
+
+def test_unsolvable_plotter_relaxes_and_keeps_ticking():
+    rt, _, _, backend, _ = make(q=GOOD_Q)
+    rt.engage()
+    rt.set_plotter_trajectory([(0.0, [0.1, 0.05]), (1.0, [0.12, 0.05])])
+    rt.set_mode(Mode.PLOTTER)
+
+    backend.raise_unreachable = True
+    rt.step(dt=0.005)
+    assert backend.relaxed >= 1
+    assert "unsolvable" in rt.telemetry()["errors"]
+
+    backend.raise_unreachable = False
+    rt.step(dt=0.005)
+    assert backend.applied
+
+
+# ------------------------------------------------------------- tick listener
+
+def test_tick_listener_called_with_telemetry_and_exception_swallowed():
+    rt, _, _, _, _ = make()
+    seen = []
+
+    def bad(_tel):
+        raise RuntimeError("boom")
+
+    def good(tel):
+        seen.append(tel)
+
+    rt.add_tick_listener(bad)   # registered first -- must not block `good`
+    rt.add_tick_listener(good)
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.1, 0.05])])
+    rt.step(dt=0.005)  # must not raise despite `bad`
+
+    assert len(seen) == 1
+    assert seen[0]["type"] == "state"
+    assert seen[0] == rt.telemetry()

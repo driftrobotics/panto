@@ -17,6 +17,7 @@ The UI is a separate websocket client (see web.py) and only sends intent.
 from __future__ import annotations
 
 import enum
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -31,12 +32,16 @@ from .kinematics import Unreachable, forward, inverse, jacobian, min_singular_va
 from .shapes import SHAPES, path_points
 
 try:  # B's canonical gate; falls back until constraints.py lands in this tree
-    from .constraints import is_active as _is_active
+    from .constraints import WorkspaceBoundary, is_active as _is_active
 except ImportError:  # pragma: no cover
+    WorkspaceBoundary = None
+
     def _is_active(proj) -> bool:
         return (not getattr(proj, "unilateral", False)) or (
             float(getattr(proj, "penetration", 0.0)) > 0.0
         )
+
+log = logging.getLogger(__name__)
 
 
 class Mode(enum.Enum):
@@ -50,6 +55,32 @@ _I2T_KNEE = 0.5     # start cutting back once the budget is half spent
 _I2T_FLOOR = 0.05   # never scale force below this, even fully depleted
 
 _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajectory
+
+
+def _scan_workspace_radii(geo, elbow: str, threshold: float, *, samples: int = 512):
+    """Once-at-init radius scan for the reachable, well-conditioned annulus
+    (``min_singular_value(J) >= threshold``) -> ``(r_min, r_max)`` metres.
+
+    The 2R arm's reach and conditioning are rotationally symmetric about the
+    base (rigidly rotating q1 doesn't change J's singular values), so scanning
+    one ray is enough -- same technique as
+    ``constraints.WorkspaceBoundary._nearest_valid``, but purely kinematic
+    (no workspace_polygon) since this is a display quantity, not the live
+    constraint.
+    """
+    reach = geo.l1 + geo.l2
+    radii = np.linspace(1e-4, reach, samples)
+    ok = np.zeros(samples, dtype=bool)
+    for i, r in enumerate(radii):
+        try:
+            q = inverse(np.array([r, 0.0]), geo, elbow=elbow)
+        except Unreachable:
+            continue
+        ok[i] = min_singular_value(q, geo) >= threshold
+    idx = np.where(ok)[0]
+    if idx.size == 0:
+        return 0.0, 0.0
+    return float(radii[idx[0]]), float(radii[idx[-1]])
 
 
 @dataclass
@@ -130,6 +161,22 @@ class Runtime:
         self._record_buf: list[dict] = []
         self._record_t0 = 0.0
         self._trajectories: dict[str, list] = {}
+
+        # always-on workspace boundary (never removable via set_constraints)
+        self._workspace = (
+            WorkspaceBoundary.from_config(config) if WorkspaceBoundary is not None
+            else None
+        )
+        self._ws_r_min, self._ws_r_max = _scan_workspace_radii(
+            config.geo, config.elbow, config.sigma_min_threshold
+        )
+
+        # I²t hard-trip latch (distinct from the soft cutback the budget
+        # already applies every tick)
+        self._tripped = False
+        self._trip_idled = False
+
+        self._tick_listeners: list[Callable[[dict], None]] = []
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -281,7 +328,10 @@ class Runtime:
 
     def engage(self) -> None:
         """UI-initiated arm. Exceptions from the link propagate uncaught --
-        the caller (web.py) reports them."""
+        the caller (web.py) reports them. Refuses while the I²t trip latch is
+        set; call ``clear_errors()`` first."""
+        if self._tripped:
+            raise RuntimeError("tripped: over_torque")
         # Same order as the bring-up scripts: limits + controller mode, park the
         # anchor on the current angle at zero gain, *then* commutate -- entering
         # closed loop against a stale input_pos lunges toward it.
@@ -296,6 +346,30 @@ class Runtime:
             self._closed_loop = True
             self._idled = False
             self._mode_entered = False
+
+    def clear_errors(self) -> None:
+        """Release the I²t trip latch and ask the link to clear any latched
+        drive-side axis faults, per motor (tolerant ``getattr``, like the
+        rest of this file). Does *not* reset the I²t accumulator itself --
+        it keeps leaking/recovering as always, so a still-over-budget motor
+        can re-trip on the very next tick."""
+        with self._lock:
+            self._tripped = False
+            self._trip_idled = False
+        clear = getattr(self._link, "clear_errors", None)
+        if callable(clear):
+            for m in self._cfg.motors:
+                try:
+                    clear(m.node_id)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def add_tick_listener(self, fn: Callable[[dict], None]) -> None:
+        """Register ``fn`` to be called with the telemetry dict after every
+        ``_publish``. Must be cheap: called from the control-loop thread.
+        Exceptions are logged and swallowed -- a listener can never crash or
+        stall the loop."""
+        self._tick_listeners.append(fn)
 
     def stop(self) -> None:
         self._stop.set()
@@ -382,8 +456,18 @@ class Runtime:
 
         sigma = min_singular_value(q, geo)
         cutback = self._i2t.update(currents, dt)
+        if bool(np.any(self._i2t.fractions() >= 1.0)):
+            self._tripped = True
         self._stats.feedback_age_ms = age * 1e3
         self._stats.tx, self._stats.rx = self._counters()
+
+        # always-on workspace boundary: active whenever pose_c leaves the
+        # reachable, well-conditioned annulus -- checked every tick,
+        # independent of mode/arming, so the error is always honest.
+        workspace_active = False
+        if self._workspace is not None:
+            workspace_active = _is_active(self._workspace.project(pose_c))
+        unsolvable = False
 
         anchor = pose.copy()
         force_limit = 0.0
@@ -398,6 +482,23 @@ class Runtime:
                     "q": q.tolist(),
                 })
 
+        # 2.5 I²t hard trip -> behave like set_idle() and latch. Checked
+        # ahead of the heartbeat watchdog: over-budget current is the more
+        # urgent cutoff and shouldn't wait on a UI heartbeat lapsing too.
+        if self._tripped:
+            with self._lock:
+                self._mode = Mode.TRANSPARENT
+                self._mode_entered = True
+                self._closed_loop = False
+            self._backend.relax()
+            if not self._trip_idled:
+                self._idle_motors()
+                self._trip_idled = True
+            self._publish(Mode.TRANSPARENT, pose, q, q_dot, anchor, currents,
+                          force_limit, sigma, unsolvable=unsolvable,
+                          workspace_active=workspace_active)
+            return
+
         # 3. heartbeat watchdog -> force TRANSPARENT + idle
         if self._clock() - self._last_heartbeat > self._cfg.heartbeat_timeout_s:
             self._watchdog_tripped = True
@@ -410,12 +511,14 @@ class Runtime:
                 self._idle_motors()
                 self._idled = True
             self._publish(Mode.TRANSPARENT, pose, q, q_dot, anchor, currents,
-                          force_limit, sigma)
+                          force_limit, sigma, unsolvable=unsolvable,
+                          workspace_active=workspace_active)
             return
 
         # unarmed: publish telemetry only, no backend calls at all.
         if not self._closed_loop:
-            self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma)
+            self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma,
+                          unsolvable=unsolvable, workspace_active=workspace_active)
             return
 
         if not entered:
@@ -433,13 +536,20 @@ class Runtime:
                 anchor = target
                 K = np.eye(2) * self._cfg.control.stiffness_n_per_m
                 force_limit = self._force_limit(sigma, cutback)
-                self._backend.apply(ImpedanceCommand(
-                    pose=pose_c, q=q, anchor=anchor,
-                    stiffness=K, force_limit=force_limit,
-                ))
+                try:
+                    self._backend.apply(ImpedanceCommand(
+                        pose=pose_c, q=q, anchor=anchor,
+                        stiffness=K, force_limit=force_limit,
+                    ))
+                except Unreachable:
+                    self._backend.relax()
+                    unsolvable = True
 
         else:  # INTERACTIVE
-            K, pull, active = self._combine(constraints, pose_c)
+            solve_set = list(constraints)
+            if self._workspace is not None:
+                solve_set.append(self._workspace)
+            K, pull, active = self._combine(solve_set, pose_c)
             if not active:
                 self._backend.relax()
             else:
@@ -448,12 +558,17 @@ class Runtime:
                 # targets, and K·(anchor-pose) == Σ K_i·(anchor_i-pose) == ΣF_i.
                 anchor = np.linalg.solve(K, pull)
                 force_limit = self._force_limit(sigma, cutback)
-                self._backend.apply(ImpedanceCommand(
-                    pose=pose_c, q=q, anchor=anchor,
-                    stiffness=K, force_limit=force_limit,
-                ))
+                try:
+                    self._backend.apply(ImpedanceCommand(
+                        pose=pose_c, q=q, anchor=anchor,
+                        stiffness=K, force_limit=force_limit,
+                    ))
+                except Unreachable:
+                    self._backend.relax()
+                    unsolvable = True
 
-        self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma)
+        self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma,
+                      unsolvable=unsolvable, workspace_active=workspace_active)
 
     # ------------------------------------------------------------------ solve
 
@@ -539,7 +654,7 @@ class Runtime:
                 pass
         return self._stats.tx, self._stats.rx
 
-    def _errors(self) -> list:
+    def _drive_errors(self) -> list:
         fn = getattr(self._link, "axis_errors", None)
         if not callable(fn):
             return []
@@ -548,8 +663,22 @@ class Runtime:
         except Exception:  # noqa: BLE001
             return []
         return [
-            f"axis{i}:0x{int(e):x}" for i, e in enumerate(errs) if int(e) != 0
+            f"drive:axis{i}:0x{int(e):x}" for i, e in enumerate(errs) if int(e) != 0
         ]
+
+    def _build_errors(self, *, unsolvable: bool, workspace_active: bool) -> list:
+        """Stable, duplicate-free error taxonomy: drive faults first (by axis
+        index), then the latched over-current trip, then this tick's solver/
+        workspace state -- always in this order regardless of the order the
+        conditions were detected in, so telemetry ordering is deterministic."""
+        errs = self._drive_errors()
+        if self._tripped:
+            errs.append("over_torque")
+        if unsolvable:
+            errs.append("unsolvable")
+        if workspace_active:
+            errs.append("workspace")
+        return errs
 
     # ------------------------------------------------------------------ telemetry
 
@@ -567,6 +696,8 @@ class Runtime:
             "force_limit": 0.0,
             "sigma_min": 0.0,
             "errors": [],
+            "tripped": False,
+            "workspace": {"r_min": self._ws_r_min, "r_max": self._ws_r_max},
             "recording": False,
             "recorded_samples": 0,
             "stats": {
@@ -576,7 +707,8 @@ class Runtime:
         }
 
     def _publish(self, mode, pose, q, q_dot, anchor, currents,
-                 force_limit, sigma) -> None:
+                 force_limit, sigma, *, unsolvable: bool = False,
+                 workspace_active: bool = False) -> None:
         tel = {
             "type": "state",
             "mode": mode.value,
@@ -589,7 +721,11 @@ class Runtime:
             "i2t_frac": self._i2t.fractions().tolist(),
             "force_limit": float(force_limit),
             "sigma_min": float(sigma),
-            "errors": self._errors(),
+            "errors": self._build_errors(
+                unsolvable=unsolvable, workspace_active=workspace_active
+            ),
+            "tripped": bool(self._tripped),
+            "workspace": {"r_min": self._ws_r_min, "r_max": self._ws_r_max},
             "recording": bool(self._recording),
             "recorded_samples": len(self._record_buf),
             "stats": {
@@ -603,6 +739,11 @@ class Runtime:
         }
         with self._tel_lock:
             self._tel = tel
+        for fn in self._tick_listeners:
+            try:
+                fn(tel)
+            except Exception:  # noqa: BLE001 - a listener must never crash the loop
+                log.exception("tick listener raised")
 
     def telemetry(self) -> dict:
         """Latest tick's state, matching the CONTRACTS.md schema."""
