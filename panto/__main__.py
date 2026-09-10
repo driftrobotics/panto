@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import socket
 
 from .backends import PositionBackend, TorqueBackend
 from .can_link import CanLink
@@ -57,6 +58,18 @@ def main() -> None:
     link = CanLink(config, sim=args.sim, sim_params=sim_params, sim_coupled=args.sim_coupled)
     backend = _BACKENDS[args.backend](link, config)
     runtime = Runtime(config, link, backend)
+
+    # Fail before touching the CAN bus if another instance holds the port --
+    # a stale `python -m panto` is the usual cause (find it with `ss -ltnp`).
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind((args.host, args.port))
+    except OSError as exc:
+        raise SystemExit(f"port {args.host}:{args.port} is busy ({exc.strerror}); another "
+                         f"panto instance is probably running -- see `ss -ltnp | grep {args.port}`")
+    finally:
+        probe.close()
 
     log.info("starting runtime (%s backend, %s)", args.backend,
              "sim" if args.sim else f"{config.can.interface}/{config.can.channel}")
