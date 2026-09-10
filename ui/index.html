@@ -189,6 +189,13 @@ let handleDrag = null;                            // {kind:'a'|'b'|'rotate'|'bod
 
 const m2p = (x, y) => [OX + x * PX, OY - y * PX];
 const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
+// The canvas is CSS-scaled (attribute 640px, displayed at a viewport-derived
+// size): map client coords to canvas pixels before p2m.
+function evToM(e) {
+  const r = cv.getBoundingClientRect();
+  const s = cv.width / r.width;
+  return p2m((e.clientX - r.left) * s, (e.clientY - r.top) * s);
+}
 
 // ------------------------------------------------------------------ tracks / trails
 const TRAIL_HZ = 60;                              // nominal broadcast rate the length control is scaled against
@@ -713,8 +720,7 @@ function updateHandleDrag(mx, my, shiftKey) {
 }
 
 cv.addEventListener('pointerdown', e => {
-  const r = cv.getBoundingClientRect();
-  const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
+  const [mx, my] = evToM(e);
   if (sim && state && Math.hypot(mx - state.pose[0], my - state.pose[1]) < 0.03) {
     dragging = true; cv.setPointerCapture(e.pointerId); return;
   }
@@ -754,8 +760,7 @@ cv.addEventListener('pointerdown', e => {
   draw();
 });
 cv.addEventListener('pointermove', e => {
-  const r = cv.getBoundingClientRect();
-  const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
+  const [mx, my] = evToM(e);
   if (dragging && state) {
     // crude: pull toward the cursor as a joint-space torque couple
     const dx = mx - state.pose[0], dy = my - state.pose[1];
