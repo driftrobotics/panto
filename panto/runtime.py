@@ -61,6 +61,7 @@ _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajecto
 _VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
 _CURRENT_CAP_MAX = 2.0  # A; drive current_hard_max is 2.5, 2 A bursts accepted 2026-09-10
 _ELBOW_HYST_RAD = np.radians(3.0)
+_WALL_RELEASE_M = 0.03   # forced this far past an engaged wall -> it lets go
 
 # Sustained-oscillation guard (user decision 2026-09-10: no K clamp, guard instead).
 _OSC_GUARD_K = 25.0   # N/m: free-air-stable tip stiffness the guard falls back to
@@ -192,6 +193,9 @@ class Runtime:
         self._osc_tripped = False
         self._elbow_mode = "auto"
         self._elbow_now = str(config.elbow)
+        self._wall_state: dict[tuple, bool] = {}
+        self._prev_pose: np.ndarray | None = None   # last tick's pose_c, for wall crossings
+        self._cur_pose: np.ndarray | None = None
 
         self._tick_listeners: list[Callable[[dict], None]] = []
 
@@ -577,6 +581,7 @@ class Runtime:
         pose_dot = J @ q_dot
         horizon = min(age, self._cfg.latency_compensation_s)
         pose_c = pose + horizon * pose_dot
+        self._prev_pose, self._cur_pose = self._cur_pose, pose_c.copy()
 
         sigma = min_singular_value(q, geo)
         cutback = self._i2t.update(currents, dt)
@@ -751,7 +756,11 @@ class Runtime:
             if isinstance(c, _c.Point) and c is not last_point:
                 continue
             proj = c.project(pose)
-            if not _is_active(proj):
+            if isinstance(c, _c.Wall):
+                # runs every tick so the engaged state also *clears*
+                if not self._wall_engaged(c, proj, pose):
+                    continue
+            elif not _is_active(proj):
                 continue
             k_i = (
                 self._cfg.control.wall_stiffness_n_per_m
@@ -763,6 +772,51 @@ class Runtime:
             pull += K_i @ np.asarray(proj.anchor, dtype=float)
             active = True
         return K, pull, active
+
+    # ------------------------------------------------------------------ walls
+
+    @staticmethod
+    def _wall_key(c) -> tuple:
+        b = None if c.b is None else tuple(np.round(np.asarray(c.b, float), 4))
+        return (tuple(np.round(np.asarray(c.a, float), 4)),
+                tuple(np.round(np.asarray(c.normal, float), 4)), b)
+
+    def _wall_engaged(self, c, proj, pose: np.ndarray) -> bool:
+        """A wall only acts if the tip crossed its surface from the free side
+        (through the segment, for a finite wall). Reaching the blocked side by
+        going around the end, or having the wall drawn onto you, leaves it
+        inert -- and passing back out through it from behind is transparent.
+        Once engaged it holds until the tip is back on the free side, or has
+        been forced more than _WALL_RELEASE_M past it."""
+        key = self._wall_key(c)
+        if proj.penetration <= 0.0:
+            self._wall_state[key] = False
+            return False
+        if self._wall_state.get(key, False):
+            engaged = proj.penetration <= _WALL_RELEASE_M
+        else:
+            engaged = self._crossed_wall(c, pose)
+        self._wall_state[key] = engaged
+        return engaged
+
+    def _crossed_wall(self, c, pose: np.ndarray) -> bool:
+        prev = self._prev_pose
+        if prev is None:
+            return False
+        a = np.asarray(c.a, float)
+        n = np.asarray(c.normal, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        s_prev, s_now = float((prev - a) @ n), float((pose - a) @ n)
+        if not (s_prev > 0.0 >= s_now):
+            return False
+        if c.b is None:
+            return True
+        b = np.asarray(c.b, float)
+        hit = prev + (s_prev / (s_prev - s_now)) * (pose - prev)
+        tangent = b - a
+        length = float(np.linalg.norm(tangent))
+        along = float((hit - a) @ tangent) / length if length > 0 else 0.0
+        return 0.0 <= along <= length
 
     def _force_limit(self, sigma: float, cutback: float) -> float:
         sigma_scale = float(

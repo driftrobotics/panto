@@ -818,3 +818,59 @@ def test_elbow_auto_follows_the_measured_branch_with_hysteresis():
     assert backend.elbow == "up"
     with pytest.raises(ValueError):
         rt.set_elbow("sideways")
+
+
+# ------------------------------------------------------------ wall engagement
+
+def _wall_pull(rt, wall, prev, pose):
+    """Run the combine step for one wall with an explicit previous pose."""
+    rt._prev_pose = None if prev is None else np.asarray(prev, float)
+    K, pull, active = rt._combine([wall], np.asarray(pose, float))
+    return active
+
+
+def test_wall_engages_only_when_crossed_from_the_free_side():
+    from panto.constraints import Wall
+
+    rt, *_ = make()
+    # horizontal finite wall y=0 from x=0..0.1, free side +y
+    wall = Wall(a=np.array([0.0, 0.0]), normal=np.array([0.0, 1.0]), b=np.array([0.1, 0.0]))
+    # crossing through the segment from the free side: engaged, holds while behind
+    assert _wall_pull(rt, wall, [0.05, 0.01], [0.05, -0.005]) is True
+    assert _wall_pull(rt, wall, [0.05, -0.005], [0.05, -0.012]) is True
+    # back out to the free side: released
+    assert _wall_pull(rt, wall, [0.05, -0.012], [0.05, 0.01]) is False
+    # going around the end and arriving behind it: inert...
+    assert _wall_pull(rt, wall, [0.15, 0.01], [0.15, -0.01]) is False
+    assert _wall_pull(rt, wall, [0.15, -0.01], [0.05, -0.01]) is False
+    # ...and passing out through it from behind is transparent
+    assert _wall_pull(rt, wall, [0.05, -0.01], [0.05, 0.01]) is False
+    # forced far past an engaged wall: it lets go
+    assert _wall_pull(rt, wall, [0.05, 0.01], [0.05, -0.005]) is True
+    assert _wall_pull(rt, wall, [0.05, -0.005], [0.05, -0.05]) is False
+
+
+def test_wall_state_survives_a_resend_with_identical_geometry():
+    from panto.constraints import Wall
+
+    rt, *_ = make()
+    w1 = Wall(a=np.array([0.0, 0.0]), normal=np.array([0.0, 1.0]), b=np.array([0.1, 0.0]))
+    assert _wall_pull(rt, w1, [0.05, 0.01], [0.05, -0.005]) is True
+    w2 = Wall(a=np.array([0.0, 0.0]), normal=np.array([0.0, 1.0]), b=np.array([0.1, 0.0]))
+    assert _wall_pull(rt, w2, [0.05, -0.005], [0.05, -0.01]) is True   # new object, same wall
+    moved = Wall(a=np.array([0.0, 0.005]), normal=np.array([0.0, 1.0]), b=np.array([0.1, 0.005]))
+    assert _wall_pull(rt, moved, [0.05, -0.01], [0.05, -0.012]) is False  # dragged onto the tip: inert
+
+
+def test_wall_drawn_onto_the_tip_is_inert_until_crossed_properly():
+    from panto.constraints import Wall
+
+    rt, cfg, link, backend, _ = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    pose = forward(GOOD_Q, cfg.geo)
+    # wall through the tip with the free side away from it
+    rt.set_constraints([Wall(a=pose + np.array([0.0, 0.005]), normal=np.array([0.0, 1.0]))])
+    rt.step(dt=0.005)
+    rt.step(dt=0.005)
+    assert not backend.applied and backend.relaxed >= 2
