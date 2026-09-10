@@ -74,6 +74,26 @@ the touch; no mandatory cooldowns while inside motor spec.
   0.8 A, hold_ff 1** (bare-default box `-153413`: RMS 0.82). `hold_ff` is a
   preset field; step_response/trace_shape/offset_sweep/point_hold/
   stiffness_bench default to it.
+- **In-hand K ladder** (user at the handle, `point_hold-20260910-161033..161324`,
+  guard off, 20 s holds, vg 0.01/0.03, hold_ff 1; the guarded attempt
+  `161004..161018` tripped within 1–8 s on every point and is void): buzz
+  band (>30 Hz tip motion) < 1 mm rms at every K/cap (K50→400: 0.20→0.44 mm
+  @0.8 A, 0.39→0.73 mm @2 A); shoulder >30 Hz current 0.03→0.28 A rms;
+  10–30 Hz band 0.3→1.7 mm @0.8 A. Force is cap-limited: 43–83 % of samples
+  pinned at 0.8 A for K≥50, ~0 % at 2 A for K≥200. I2t per hold 6–12 A²s
+  @0.8 A, 19–48 A²s @2 A; FETs 33/37 °C after. Conclusion: with a hand on the
+  handle there is no velocity-loop buzz up to K400 at these gains; the
+  hands-off 3 Hz relay swing is the only failure mode to guard.
+  **Subjective feel (user):** 0.8 A — K50 good, not buzzy; K100 slightly more
+  oscillation, fine when held; K200 oscillates a lot, must hold on, not
+  noticeably stiffer than K100; K400 buzzy at idle, elbow tip oscillates
+  (shoulder fine), disliked. 2 A — K50 nice; K100 clearly more holding power;
+  K200 little extra, I2t high, shoulder gets hot; K400 buzzy at rest, not
+  worth it. Verdict: K100/K200 @0.8 A handheld are fine; 2 A only at K≤100
+  and briefly. Open: try elbow vel_gain 0.02 for the high-K elbow buzz.
+  Cooling/rest pose recorded in calibration.json `cooling_pose`
+  (77.5, 167.5) mm, q (107.5°, −84.9°). Thermal block set: i_continuous 0.8 A,
+  budget 40 A²s.
 - Reset paradigm: with no friction the arm drifts after `reset_pose` goes
   IDLE. `step_response --start-at-test-pose` now arms where the arm is, ramps
   the anchor to test_pose (1.5 s + 0.5 s hold), then steps.
