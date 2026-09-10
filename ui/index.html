@@ -88,6 +88,13 @@
   </section>
 
   <section>
+    <h2>Feel</h2>
+    <div id="feel"></div>
+    <div id="feel-now" class="hint">–</div>
+    <div class="hint">hard needs a hand on the handle — free-air oscillates above ~25 N/m</div>
+  </section>
+
+  <section>
     <h2>Record</h2>
     <button id="rec-start">● Record</button>
     <button id="rec-stop">■ Stop</button>
@@ -325,7 +332,33 @@ traceBtn.onclick = () => {
 };
 
 /* ------------------------------------------------------------------ shared control gating */
+/* ------------------------------------------------------------------ feel presets (N/m) */
+const FEEL = {
+  soft:   { stiffness_n_per_m: 10,  wall_stiffness_n_per_m: 25,  force_limit_n: 1.0 },
+  medium: { stiffness_n_per_m: 25,  wall_stiffness_n_per_m: 50,  force_limit_n: 2.0 },
+  hard:   { stiffness_n_per_m: 100, wall_stiffness_n_per_m: 100, force_limit_n: 3.0 },
+};
+const feelHost = document.getElementById('feel');
+for (const name of Object.keys(FEEL)) {
+  const b = document.createElement('button');
+  b.textContent = name; b.dataset.feel = name;
+  b.onclick = () => send({ type: 'set_tuning', ...FEEL[name] });
+  feelHost.appendChild(b);
+}
+function updateFeel() {
+  const t = state && state.tuning;
+  if (!t) return;
+  document.getElementById('feel-now').textContent =
+    `K ${t.stiffness_n_per_m} · wall ${t.wall_stiffness_n_per_m} N/m · ${t.force_limit_n} N`;
+  feelHost.querySelectorAll('button').forEach(b => {
+    const p = FEEL[b.dataset.feel];
+    b.disabled = !controller;
+    b.setAttribute('aria-pressed', Object.keys(p).every(k => Math.abs(p[k] - t[k]) < 1e-6));
+  });
+}
+
 function updateControls() {
+  updateFeel();
   const s = state;
   const armed = !!(s && s.closed_loop);
   const recording = s ? (s.recording ?? false) : false;

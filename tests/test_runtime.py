@@ -268,7 +268,7 @@ def test_telemetry_matches_schema():
     assert set(tel) == {
         "type", "mode", "closed_loop", "pose", "q", "q_dot", "anchor",
         "currents", "i2t_frac", "force_limit", "sigma_min", "errors",
-        "tripped", "workspace", "recording", "recorded_samples", "stats",
+        "tripped", "tuning", "workspace", "recording", "recorded_samples", "stats",
     }
     assert tel["type"] == "state"
     assert tel["mode"] == "interactive"
@@ -425,6 +425,32 @@ def test_loop_exception_idles_goes_passive_and_keeps_ticking():
     rt._stop.set()
     t.join(timeout=2.0)
     assert "loop:ZeroDivisionError" not in " ".join(rt.telemetry()["errors"])
+
+
+def test_set_tuning_changes_live_stiffness_and_rejects_bad_values():
+    rt, cfg, _, backend, _ = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([FakePoint([0.12, 0.06])])
+    rt.set_tuning(stiffness_n_per_m=25.0, wall_stiffness_n_per_m=50.0)
+    rt.step(dt=0.005)
+    assert backend.applied[-1].stiffness[0, 0] == pytest.approx(25.0)
+    assert rt.telemetry()["tuning"]["wall_stiffness_n_per_m"] == 50.0
+    with pytest.raises(ValueError):
+        rt.set_tuning(stiffness_n_per_m=0.0)
+    with pytest.raises(ValueError):
+        rt.set_tuning(pos_gain=5.0)
+
+
+def test_only_the_most_recent_point_acts():
+    from panto.constraints import Point
+
+    rt, _, _, backend, _ = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_constraints([Point(at=np.array([0.10, 0.02])), Point(at=np.array([0.14, 0.08]))])
+    rt.step(dt=0.005)
+    assert np.allclose(backend.applied[-1].anchor, [0.14, 0.08])
 
 
 def test_playback_of_a_take_near_a_singularity_is_not_refused():

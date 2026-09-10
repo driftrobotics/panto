@@ -257,6 +257,9 @@ class WebServer:
             fn = getattr(self._rt, "clear_errors", None)
             if callable(fn):
                 fn()
+        elif kind == "set_tuning":
+            self._try(ws, self._rt.set_tuning,
+                      **{k: v for k, v in msg.items() if k != "type"})
         else:
             log.debug("ignoring message kind=%r", kind)
 

@@ -25,6 +25,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from . import constraints as _c
 from .backends import ImpedanceBackend, ImpedanceCommand
 from .can_link import CanLink
 from .config import Config
@@ -223,6 +224,24 @@ class Runtime:
 
     def note_closed_loop(self, value: bool) -> None:
         self._closed_loop = bool(value)
+
+    _TUNING_FIELDS = ("stiffness_n_per_m", "wall_stiffness_n_per_m", "force_limit_n")
+
+    def set_tuning(self, **fields: float) -> None:
+        """Live feel presets from the UI: any of ``stiffness_n_per_m``,
+        ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats)."""
+        bad = set(fields) - set(self._TUNING_FIELDS)
+        if bad:
+            raise ValueError(f"unknown tuning field(s): {sorted(bad)}")
+        with self._lock:
+            for name, value in fields.items():
+                v = float(value)
+                if not v > 0.0:
+                    raise ValueError(f"{name} must be > 0, got {value!r}")
+                setattr(self._cfg.control, name, v)
+
+    def _tuning(self) -> dict:
+        return {name: float(getattr(self._cfg.control, name)) for name in self._TUNING_FIELDS}
 
     # ------------------------------------------------------------------ record
 
@@ -601,7 +620,12 @@ class Runtime:
         K = np.zeros((2, 2))
         pull = np.zeros(2)
         active = False
+        # Points are "hold here" targets: only the most recently added one acts
+        # (averaging several into a centroid is not what anyone means by it).
+        last_point = next((c for c in reversed(constraints) if isinstance(c, _c.Point)), None)
         for c in constraints:
+            if isinstance(c, _c.Point) and c is not last_point:
+                continue
             proj = c.project(pose)
             if not _is_active(proj):
                 continue
@@ -713,6 +737,7 @@ class Runtime:
             "sigma_min": 0.0,
             "errors": [],
             "tripped": False,
+            "tuning": self._tuning(),
             "workspace": {"r_min": self._ws_r_min, "r_max": self._ws_r_max},
             "recording": False,
             "recorded_samples": 0,
@@ -741,6 +766,7 @@ class Runtime:
                 unsolvable=unsolvable, workspace_active=workspace_active
             ),
             "tripped": bool(self._tripped),
+            "tuning": self._tuning(),
             "workspace": {"r_min": self._ws_r_min, "r_max": self._ws_r_max},
             "recording": bool(self._recording),
             "recorded_samples": len(self._record_buf),
