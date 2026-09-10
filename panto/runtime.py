@@ -157,7 +157,8 @@ class Runtime:
         self._mode = Mode.TRANSPARENT
         self._mode_entered = False
         self._constraints: list = []
-        self._trajectory: list[tuple[float, np.ndarray]] = []
+        self._trajectory: list[tuple[float, np.ndarray]] = []      # Cartesian (t, xy)
+        self._trajectory_q: list[tuple[float, np.ndarray]] = []    # joint-space (t, q)
         self._traj_t0 = 0.0
 
         self._i2t = _I2tBudget(config)
@@ -220,6 +221,7 @@ class Runtime:
             self._trajectory = [
                 (float(t), np.asarray(xy, dtype=float)) for t, xy in points
             ]
+            self._trajectory_q = []
             self._traj_t0 = self._clock()
 
     def note_heartbeat(self) -> None:
@@ -348,9 +350,16 @@ class Runtime:
         follower. Raises ``KeyError`` if ``id`` was never recorded."""
         with self._lock:
             buf = self._trajectories[id]
-        points = [(float(s["t"]), np.asarray(s["pose"], dtype=float)) for s in buf]
-        # Recorded poses are reachable by construction -- no reach/sigma check.
-        self._follow(points, validate=False)
+        # Joint space: a take is replayed on the joint angles it was recorded at
+        # (no IK, no reach/branch questions), ramped in from the current q.
+        q0, _ = (np.asarray(a, dtype=float) for a in self._link.joint_state())
+        traj = [(0.0, q0)] + [(_LEAD_IN_S + float(s["t"]), np.asarray(s["q"], dtype=float))
+                              for s in buf]
+        with self._lock:
+            self._trajectory_q = traj
+            self._trajectory = []
+            self._traj_t0 = self._clock()
+        self.set_mode(Mode.PLOTTER)
 
     # ------------------------------------------------------------------ trace
 
@@ -646,18 +655,22 @@ class Runtime:
             self._backend.relax()
 
         elif mode is Mode.PLOTTER:
-            target = self._trajectory_target()
+            q_target = self._interp(self._trajectory_q)
+            target = forward(q_target, geo) if q_target is not None else self._interp(self._trajectory)
             if target is None:
                 self._backend.relax()
             else:
                 anchor = target
                 K = np.eye(2) * self._cfg.control.stiffness_n_per_m
                 force_limit = self._force_limit(sigma, cutback)
+                cmd = ImpedanceCommand(pose=pose_c, q=q, anchor=anchor,
+                                       stiffness=K, force_limit=force_limit)
                 try:
-                    self._backend.apply(ImpedanceCommand(
-                        pose=pose_c, q=q, anchor=anchor,
-                        stiffness=K, force_limit=force_limit,
-                    ))
+                    apply_joint = getattr(self._backend, "apply_joint", None)
+                    if q_target is not None and callable(apply_joint):
+                        apply_joint(q_target, cmd)
+                    else:
+                        self._backend.apply(cmd)
                 except Unreachable:
                     self._backend.relax()
                     unsolvable = True
@@ -757,19 +770,21 @@ class Runtime:
         )
         return self._cfg.control.force_limit_n * sigma_scale * cutback
 
-    def _trajectory_target(self) -> np.ndarray | None:
-        if not self._trajectory:
+    def _interp(self, traj: list[tuple[float, np.ndarray]]) -> np.ndarray | None:
+        """Piecewise-linear sample of a (t, vector) trajectory at loop time;
+        holds the last point once past the end."""
+        if not traj:
             return None
         t = self._clock() - self._traj_t0
-        prev = self._trajectory[0]
-        for pt in self._trajectory:
+        prev = traj[0]
+        for pt in traj:
             if pt[0] >= t:
                 if pt is prev or pt[0] == prev[0]:
                     return pt[1].copy()
                 frac = (t - prev[0]) / (pt[0] - prev[0])
                 return prev[1] + frac * (pt[1] - prev[1])
             prev = pt
-        return self._trajectory[-1][1].copy()
+        return traj[-1][1].copy()
 
     # ------------------------------------------------------------------ helpers
 

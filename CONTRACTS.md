@@ -298,6 +298,12 @@ wall_stiffness_n_per_m?, force_limit_n?, vel_gain?:[v0,v1], current_cap_a?}`,
 `set_elbow {mode:"up"|"down"|"auto"}`, `clear_errors`. Telemetry `tuning` echoes all of
 these plus `elbow_now` (the branch in use this tick).
 
+Playback is **joint-space**: a take replays the `q` it recorded (linear ramp in `q`
+from the current pose, then the samples) through `ImpedanceBackend.apply_joint(q_target,
+cmd)`; the base default picks the IK branch from the target and renders
+`cmd.anchor = forward(q_target)`, a backend that can command joints directly overrides it.
+Analytic shapes (`trace_shape`) stay Cartesian and validated.
+
 Constraint items: `line`/`wall` take an optional second endpoint `b:[x,y]` (finite
 segment; a wall has no surface past its ends); `point`/`line`/`grid` take an optional
 `snap_m` (metres): the constraint is inert until the tip is within that distance

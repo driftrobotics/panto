@@ -57,3 +57,13 @@ class ImpedanceBackend(abc.ABC):
     @abc.abstractmethod
     def relax(self) -> None:
         """Command zero interaction force (transparent mode / fault)."""
+
+    def apply_joint(self, q_target: np.ndarray, cmd: ImpedanceCommand) -> None:
+        """Render a *joint-space* target (recorded playback runs on joint angles,
+        spec "Deferred / TODO"). ``cmd.anchor`` is already ``forward(q_target)``.
+        Default: choose the IK branch from the target itself -- never the mirror
+        image of a pose the arm physically visited -- then render as Cartesian.
+        Backends that can command joints directly override this."""
+        if hasattr(self, "elbow"):
+            self.elbow = "down" if float(q_target[1]) < 0.0 else "up"
+        self.apply(cmd)

@@ -382,16 +382,63 @@ def test_played_back_trajectories_ramp_in_from_the_current_pose():
     rt.record_stop()
     link.q = np.array([0.6, 1.3])                       # arm moved since the take
     rt.playback("last")
-    traj = rt._trajectory
-    assert traj[0][0] == 0.0
-    assert np.allclose(traj[0][1], forward(link.q, cfg.geo))
+    traj = rt._trajectory_q                             # joint space, no IK
+    assert rt._trajectory == []
+    assert traj[0][0] == 0.0 and np.allclose(traj[0][1], link.q)
     assert traj[1][0] == pytest.approx(2.0)             # first recorded sample after the ramp
-    assert np.allclose(traj[1][1], forward(GOOD_Q, cfg.geo))
+    assert np.allclose(traj[1][1], GOOD_Q)
 
     rt.trace_shape("circle", 0.02, forward(link.q, cfg.geo), 0.01)
     traj = rt._trajectory
     assert traj[0][0] == 0.0 and np.allclose(traj[0][1], forward(link.q, cfg.geo))
     assert traj[1][0] == pytest.approx(2.0)
+
+
+def test_playback_drives_the_backend_in_joint_space():
+    from panto.backends import ImpedanceBackend
+
+    class JointBackend(ImpedanceBackend):
+        def __init__(self):
+            self.joint_calls, self.elbow = [], None
+        def apply(self, cmd): raise AssertionError("cartesian apply must not be used for playback")
+        def relax(self): pass
+        def apply_joint(self, q_target, cmd):
+            self.joint_calls.append((q_target.copy(), cmd))
+
+    cfg = Config.load()
+    link = FakeLink(q=np.array([0.4, -1.1]))            # arm now elbow-down
+    backend = JointBackend()
+    rt = Runtime(cfg, link, backend, clock=(clock := Clock()))
+    rt.note_heartbeat(); rt.engage()
+    rt.record_start(); rt.step(dt=0.005); rt.record_stop()   # take at q = (0.4, -1.1)
+    link.q = np.array([0.5, 1.0])                        # user flipped the elbow since
+    rt.playback("last")
+    rt.step(dt=0.005)                                    # mode entry starts the ramp clock
+    clock.t += 1.0                                       # halfway through the 2 s ramp
+    rt.step(dt=0.005)
+    q_t, cmd = backend.joint_calls[-1]
+    assert np.allclose(q_t, [0.45, -0.05])               # linear in q, not in xy
+    assert np.allclose(cmd.anchor, forward(q_t, cfg.geo))
+    clock.t += 1.5
+    rt.step(dt=0.005)
+    assert np.allclose(backend.joint_calls[-1][0], [0.4, -1.1])
+
+
+def test_default_apply_joint_picks_the_branch_from_the_target():
+    from panto.backends import ImpedanceBackend, ImpedanceCommand
+
+    class Cartesian(ImpedanceBackend):
+        def __init__(self): self.elbow, self.seen = "up", []
+        def apply(self, cmd): self.seen.append((self.elbow, cmd.anchor.copy()))
+        def relax(self): pass
+
+    b = Cartesian()
+    cfg = Config.load()
+    q_t = np.array([0.4, -1.1])
+    cmd = ImpedanceCommand(pose=np.zeros(2), q=np.zeros(2), anchor=forward(q_t, cfg.geo),
+                           stiffness=np.eye(2), force_limit=1.0)
+    b.apply_joint(q_t, cmd)
+    assert b.seen[-1][0] == "down"                       # never the mirror image
 
 
 def test_loop_exception_idles_goes_passive_and_keeps_ticking():
