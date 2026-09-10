@@ -16,8 +16,11 @@
     display:grid; grid-template-columns:minmax(0,1fr) 320px; min-height:100vh;
   }
   @media (max-width:820px) { body { grid-template-columns:1fr; } }
-  main { display:grid; place-items:center; padding:24px; gap:12px; align-content:center; }
-  canvas { touch-action:none; background:#0a0c10; border:1px solid var(--line); border-radius:8px; cursor:crosshair; }
+  main { display:grid; place-items:start center; padding:24px; gap:12px; align-content:start; }
+  canvas {
+    touch-action:none; background:#0a0c10; border:1px solid var(--line); border-radius:8px; cursor:crosshair;
+    max-width:min(90vw, 85vh); height:auto;
+  }
   aside { background:var(--panel); border-left:1px solid var(--line); padding:20px; overflow-y:auto; }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; font-weight:600; }
   section + section { margin-top:22px; }
@@ -60,10 +63,10 @@
 </head>
 <body>
 <main>
-  <canvas id="view" width="440" height="440"></canvas>
+  <canvas id="view" width="640" height="640"></canvas>
   <div id="status" class="dead">connecting…</div>
   <button id="engage-toggle" disabled>Engage</button>
-  <div class="hint">drag with the selected tool to author a constraint · drag from the tip for a "hand" force (sim) · g toggles a default grid · Delete removes the selected constraint</div>
+  <div class="hint">drag with the selected tool to author a constraint · drag from the tip for a "hand" force (sim) · g toggles a default grid · Delete removes the selected constraint · pick Rect (below) to trace a rectangle by dragging</div>
 </main>
 <div id="toast"></div>
 
@@ -91,7 +94,7 @@
     <h2>Feel</h2>
     <div id="feel"></div>
     <div id="feel-now" class="hint">–</div>
-    <div class="hint">hard needs a hand on the handle — free-air oscillates above ~25 N/m</div>
+    <div class="hint">free-air oscillates above ~25 N/m; hard/harder need a hand on the handle and are unverified since the 2026-09-09 rework — the runtime drops to K25 if the tip oscillates &gt;3 mm for 0.5 s</div>
   </section>
 
   <section>
@@ -115,6 +118,17 @@
     <label>size <input id="shape-size" type="number" min="1" step="1" value="40"> mm</label>
     <label>speed <input id="shape-speed" type="number" min="1" step="1" value="20"> mm/s</label>
     <button id="trace-btn">Trace</button>
+    <button id="tool-rect" data-tool="rect">Rect (drag on canvas)</button>
+    <div class="hint">Rect uses the speed above · drag a corner to the opposite corner on the canvas</div>
+  </section>
+
+  <section>
+    <h2>Track</h2>
+    <label><input id="trail-tip-on" type="checkbox"> tip trail</label>
+    <label><input id="trail-anchor-on" type="checkbox"> anchor trail</label>
+    <label>smoothing <input id="trail-smooth" type="number" min="0" max="0.95" step="0.05" value="0"></label>
+    <label>length <input id="trail-length" type="number" min="1" max="30" step="1" value="10"> s</label>
+    <button id="trail-clear">Clear trails</button>
   </section>
 
   <section>
@@ -162,9 +176,64 @@ let activeTool = 'point';                         // 'point'|'line'|'wall'|'grid
 let selectedIndex = -1;
 let authoring = false, draft = null;              // {kind, a:[x,y], cur:[x,y]}
 let dragging = false;                             // sim "hand" drag
+let lastRect = null;                              // {size_m:[w,h], centre:[x,y]} of last traced rectangle
 
 const m2p = (x, y) => [OX + x * PX, OY - y * PX];
 const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
+
+// ------------------------------------------------------------------ tracks / trails
+const TRAIL_HZ = 60;                              // nominal broadcast rate the length control is scaled against
+function makeRing(cap) {
+  cap = Math.max(1, Math.round(cap));
+  return { xs: new Float32Array(cap), ys: new Float32Array(cap), head: 0, count: 0, cap };
+}
+function ringPush(r, x, y) {
+  r.xs[r.head] = x; r.ys[r.head] = y;
+  r.head = (r.head + 1) % r.cap;
+  r.count = Math.min(r.count + 1, r.cap);
+}
+function ringClear(r) { r.head = 0; r.count = 0; }
+
+let tipTrailOn = false, anchorTrailOn = false;
+let ewmaAlpha = 0;
+let tipEwma = null, anchorEwma = null;
+let trailLenSec = 10;
+let tipTrail = makeRing(trailLenSec * TRAIL_HZ);
+let anchorTrail = makeRing(trailLenSec * TRAIL_HZ);
+
+function updateTrails(s) {
+  const a = ewmaAlpha;
+  if (s.pose) {
+    if (!tipEwma) tipEwma = [s.pose[0], s.pose[1]];
+    else { tipEwma[0] = a * tipEwma[0] + (1 - a) * s.pose[0]; tipEwma[1] = a * tipEwma[1] + (1 - a) * s.pose[1]; }
+    if (tipTrailOn) ringPush(tipTrail, tipEwma[0], tipEwma[1]);
+  }
+  if (s.anchor) {
+    if (!anchorEwma) anchorEwma = [s.anchor[0], s.anchor[1]];
+    else { anchorEwma[0] = a * anchorEwma[0] + (1 - a) * s.anchor[0]; anchorEwma[1] = a * anchorEwma[1] + (1 - a) * s.anchor[1]; }
+    if (anchorTrailOn) ringPush(anchorTrail, anchorEwma[0], anchorEwma[1]);
+  }
+}
+
+const trailTipChk = document.getElementById('trail-tip-on');
+const trailAnchorChk = document.getElementById('trail-anchor-on');
+const trailSmoothInput = document.getElementById('trail-smooth');
+const trailLengthInput = document.getElementById('trail-length');
+trailTipChk.onchange = () => { tipTrailOn = trailTipChk.checked; if (!tipTrailOn) ringClear(tipTrail); };
+trailAnchorChk.onchange = () => { anchorTrailOn = trailAnchorChk.checked; if (!anchorTrailOn) ringClear(anchorTrail); };
+trailSmoothInput.onchange = () => {
+  ewmaAlpha = Math.min(0.95, Math.max(0, parseFloat(trailSmoothInput.value) || 0));
+};
+trailLengthInput.onchange = () => {
+  trailLenSec = Math.max(1, parseFloat(trailLengthInput.value) || 10);
+  tipTrail = makeRing(trailLenSec * TRAIL_HZ);
+  anchorTrail = makeRing(trailLenSec * TRAIL_HZ);
+  tipEwma = null; anchorEwma = null;
+};
+document.getElementById('trail-clear').onclick = () => {
+  ringClear(tipTrail); ringClear(anchorTrail);
+  tipEwma = null; anchorEwma = null;
+};
 
 /* ------------------------------------------------------------------ transport */
 function connect() {
@@ -175,7 +244,7 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === 'hello') { controller = m.controller; sim = m.sim; modes = m.modes; renderModes(); }
     else if (m.type === 'role') { controller = m.controller; renderModes(); updateControls(); }
-    else if (m.type === 'state') { state = m; draw(); panel(m); }
+    else if (m.type === 'state') { state = m; updateTrails(m); draw(); panel(m); }
     else if (m.type === 'error') { showToast(m.message); }
   };
 }
@@ -213,12 +282,14 @@ function setTool(tool) {
   selectedIndex = -1;
   document.querySelectorAll('#tool-palette button').forEach(b =>
     b.setAttribute('aria-pressed', String(b.dataset.tool === tool)));
+  document.getElementById('tool-rect').setAttribute('aria-pressed', String(tool === 'rect'));
   renderConstraintList();
   draw();
 }
 document.querySelectorAll('#tool-palette button').forEach(b => {
   b.onclick = () => setTool(b.dataset.tool);
 });
+document.getElementById('tool-rect').onclick = () => setTool('rect');
 
 function sendConstraints() {
   send({ type: 'set_constraints', constraints });
@@ -228,6 +299,7 @@ document.getElementById('clear-c').onclick = () => {
   if (!controller) return;
   constraints = [];
   selectedIndex = -1;
+  lastRect = null;
   sendConstraints();
   renderConstraintList();
   draw();
@@ -337,6 +409,7 @@ const FEEL = {
   soft:   { stiffness_n_per_m: 10,  wall_stiffness_n_per_m: 25,  force_limit_n: 1.0 },
   medium: { stiffness_n_per_m: 25,  wall_stiffness_n_per_m: 50,  force_limit_n: 2.0 },
   hard:   { stiffness_n_per_m: 100, wall_stiffness_n_per_m: 100, force_limit_n: 3.0 },
+  harder: { stiffness_n_per_m: 200, wall_stiffness_n_per_m: 200, force_limit_n: 3.0 },
 };
 const feelHost = document.getElementById('feel');
 for (const name of Object.keys(FEEL)) {
@@ -379,6 +452,7 @@ function updateControls() {
     : (recordedSamples > 0 ? `${recordedSamples} samples recorded` : 'not recording');
 
   traceBtn.disabled = !controller;
+  document.getElementById('tool-rect').disabled = !controller;
   document.getElementById('clear-c').disabled = !controller;
   document.getElementById('clear-err').disabled = !controller;
 }
@@ -482,6 +556,14 @@ function endAuthoring() {
     const pitchInput = (parseFloat(document.getElementById('grid-pitch').value) || 20) / 1000;
     const pitch = Math.max(dragDistM > minDragM ? dragDistM : pitchInput, 0.005);
     c = { kind: 'grid', pitch, origin: [ax, ay] };
+  } else if (draft.kind === 'rect') {
+    if (dragDistM > minDragM && controller) {
+      const size_m = [Math.abs(cx - ax), Math.abs(cy - ay)];
+      const centre = [(ax + cx) / 2, (ay + cy) / 2];
+      const speed = (parseFloat(document.getElementById('shape-speed').value) || 0) / 1000;
+      lastRect = { size_m, centre };
+      send({ type: 'trace_shape', shape: 'box', size_m, centre, speed, laps: 1 });
+    }
   }
 
   if (c) {
@@ -607,6 +689,47 @@ function drawDraft(d) {
     const dragDistM = Math.hypot(d.cur[0] - d.a[0], d.cur[1] - d.a[1]);
     const pitch = Math.max(dragDistM > 3 / PX ? dragDistM : pitchInput, 0.005);
     drawGridDots(pitch, d.a);
+  } else if (d.kind === 'rect') {
+    const p1 = m2p(d.a[0], d.a[1]), p2 = m2p(d.cur[0], d.cur[1]);
+    const x = Math.min(p1[0], p2[0]), y = Math.min(p1[1], p2[1]);
+    ctx.strokeRect(x, y, Math.abs(p2[0] - p1[0]), Math.abs(p2[1] - p1[1]));
+  }
+  ctx.restore();
+}
+
+function drawLastRect() {
+  if (!lastRect) return;
+  const [w, h] = lastRect.size_m;
+  const [cx, cy] = lastRect.centre;
+  const p1 = m2p(cx - w / 2, cy + h / 2);   // top-left in canvas space
+  const p2 = m2p(cx + w / 2, cy - h / 2);   // bottom-right in canvas space
+  ctx.save();
+  ctx.strokeStyle = '#4ba36a';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(p1[0], p1[1], p2[0] - p1[0], p2[1] - p1[1]);
+  ctx.fillStyle = '#4ba36a';
+  ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${(w * 1000).toFixed(0)} × ${(h * 1000).toFixed(0)} mm`, (p1[0] + p2[0]) / 2, Math.min(p1[1], p2[1]) - 6);
+  ctx.restore();
+}
+
+function drawTrail(ring, rgb) {
+  if (ring.count < 2) return;
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = 'round';
+  const start = (ring.head - ring.count + ring.cap) % ring.cap;
+  let prevX = null, prevY = null;
+  for (let k = 0; k < ring.count; k++) {
+    const idx = (start + k) % ring.cap;
+    const p = m2p(ring.xs[idx], ring.ys[idx]);
+    if (prevX !== null) {
+      const alpha = 0.05 + 0.55 * (k / (ring.count - 1));
+      ctx.strokeStyle = `rgba(${rgb},${alpha.toFixed(3)})`;
+      ctx.beginPath(); ctx.moveTo(prevX, prevY); ctx.lineTo(p[0], p[1]); ctx.stroke();
+    }
+    prevX = p[0]; prevY = p[1];
   }
   ctx.restore();
 }
@@ -636,6 +759,9 @@ function draw() {
 
   drawWorkspace();
   drawConstraints();
+  drawLastRect();
+  if (tipTrailOn) drawTrail(tipTrail, '80,100,200');
+  if (anchorTrailOn) drawTrail(anchorTrail, '58,160,212');
 
   if (!state) return;
   const [q1, q2] = state.q;

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections import deque
 import threading
 import time
 from dataclasses import dataclass
@@ -58,6 +59,11 @@ _I2T_FLOOR = 0.05   # never scale force below this, even fully depleted
 _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajectory
 
 _VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
+
+# Sustained-oscillation guard (user decision 2026-09-10: no K clamp, guard instead).
+_OSC_GUARD_K = 25.0   # N/m: free-air-stable tip stiffness the guard falls back to
+_OSC_WINDOW_S = 0.5
+_OSC_MM = 3.0         # tip-error std over the window that counts as oscillating
 
 
 def _scan_workspace_radii(geo, elbow: str, threshold: float, *, samples: int = 512):
@@ -179,6 +185,8 @@ class Runtime:
         self._tripped = False
         self._trip_idled = False
         self._loop_error: str | None = None
+        self._osc_hist: deque = deque()
+        self._osc_tripped = False
 
         self._tick_listeners: list[Callable[[dict], None]] = []
 
@@ -249,6 +257,8 @@ class Runtime:
                 if not v > 0.0:
                     raise ValueError(f"{name} must be > 0, got {value!r}")
                 setattr(self._cfg.control, name, v)
+            self._osc_tripped = False       # a new preset re-arms the guard
+            self._osc_hist.clear()
             if vel_gain is not None:
                 for m, v in zip(self._cfg.motors, gains):
                     m.vel_gain = v
@@ -415,6 +425,7 @@ class Runtime:
             self._tripped = False
             self._trip_idled = False
             self._loop_error = None
+            self._osc_tripped = False
         clear = getattr(self._link, "clear_errors", None)
         if callable(clear):
             for m in self._cfg.motors:
@@ -632,8 +643,35 @@ class Runtime:
                     self._backend.relax()
                     unsolvable = True
 
+        # force_limit > 0 only on ticks where the backend rendered an anchor
+        self._guard_oscillation(pose, anchor, applied=force_limit > 0.0)
         self._publish(mode, pose, q, q_dot, anchor, currents, force_limit, sigma,
                       unsolvable=unsolvable, workspace_active=workspace_active)
+
+    def _guard_oscillation(self, pose: np.ndarray, anchor: np.ndarray, *, applied: bool) -> None:
+        """Above K25 the free-air arm relay-cycles at the current cap (hand let
+        go -> ~3 Hz swing); the hand is the damping. If the tip error keeps
+        swinging > _OSC_MM for a window, fall back to K25 and flag the UI."""
+        if not applied or self._cfg.control.stiffness_n_per_m <= _OSC_GUARD_K:
+            self._osc_hist.clear()
+            return
+        t = self._clock()
+        self._osc_hist.append((t, np.asarray(pose - anchor, dtype=float)))
+        while self._osc_hist and self._osc_hist[0][0] < t - _OSC_WINDOW_S:
+            self._osc_hist.popleft()
+        if len(self._osc_hist) < 8 or t - self._osc_hist[0][0] < 0.8 * _OSC_WINDOW_S:
+            return
+        err = np.array([e for _, e in self._osc_hist])
+        std_mm = err.std(axis=0) * 1e3
+        if np.any(std_mm > _OSC_MM):
+            with self._lock:
+                self._cfg.control.stiffness_n_per_m = _OSC_GUARD_K
+                self._cfg.control.wall_stiffness_n_per_m = min(
+                    self._cfg.control.wall_stiffness_n_per_m, 2.0 * _OSC_GUARD_K)
+                self._osc_tripped = True
+            self._osc_hist.clear()
+            log.warning("oscillation guard: tip error std %s mm over %.1fs -> K%.0f",
+                        np.round(std_mm, 2).tolist(), _OSC_WINDOW_S, _OSC_GUARD_K)
 
     # ------------------------------------------------------------------ solve
 
@@ -744,6 +782,8 @@ class Runtime:
         errs = self._drive_errors()
         if self._loop_error:
             errs.append(self._loop_error)
+        if self._osc_tripped:
+            errs.append("osc_guard")
         if self._tripped:
             errs.append("over_torque")
         if unsolvable:

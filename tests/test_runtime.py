@@ -697,3 +697,39 @@ def test_engage_pushes_config_vel_gains_clamped():
         rt.set_tuning(vel_gain=[0.1, 0.03])
     with pytest.raises(ValueError):
         rt.set_tuning(vel_gain=[0.01])
+
+
+def test_oscillation_guard_drops_to_k25_and_flags():
+    from panto.kinematics import inverse
+
+    rt, cfg, link, backend, clock = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_tuning(stiffness_n_per_m=100.0, wall_stiffness_n_per_m=100.0)
+    centre = forward(GOOD_Q, cfg.geo)
+    rt.set_constraints([FakePoint(centre)])
+    q_hi = inverse(centre + np.array([0.0, 0.005]), cfg.geo, elbow="up")
+    q_lo = inverse(centre - np.array([0.0, 0.005]), cfg.geo, elbow="up")
+    for i in range(160):                                   # 0.8 s at 200 Hz, +-5 mm square wave
+        link.q = q_hi if (i // 10) % 2 == 0 else q_lo
+        clock.t += 0.005
+        rt.step(dt=0.005)
+    assert cfg.control.stiffness_n_per_m == 25.0
+    assert cfg.control.wall_stiffness_n_per_m == 50.0
+    assert "osc_guard" in rt.telemetry()["errors"]
+    rt.set_tuning(stiffness_n_per_m=100.0)                 # re-arming clears the flag
+    clock.t += 0.005
+    rt.step(dt=0.005)
+    assert "osc_guard" not in rt.telemetry()["errors"]
+
+
+def test_oscillation_guard_ignores_steady_tracking_and_low_k():
+    rt, cfg, link, _, clock = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    rt.set_tuning(stiffness_n_per_m=100.0)
+    rt.set_constraints([FakePoint(forward(GOOD_Q, cfg.geo) + np.array([0.02, 0.0]))])
+    for _ in range(160):                                   # 20 mm static error, no swing
+        clock.t += 0.005
+        rt.step(dt=0.005)
+    assert cfg.control.stiffness_n_per_m == 100.0
