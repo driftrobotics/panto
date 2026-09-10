@@ -27,7 +27,7 @@ import numpy as np
 from .backends import ImpedanceBackend, ImpedanceCommand
 from .can_link import CanLink
 from .config import Config
-from .kinematics import forward, jacobian, min_singular_value
+from .kinematics import Unreachable, forward, inverse, jacobian, min_singular_value
 from .shapes import SHAPES, path_points
 
 try:  # B's canonical gate; falls back until constraints.py lands in this tree
@@ -48,6 +48,8 @@ class Mode(enum.Enum):
 # --- I²t cutback curve knobs (why: 0.8 A is a *transient* rating) -------------
 _I2T_KNEE = 0.5     # start cutting back once the budget is half spent
 _I2T_FLOOR = 0.05   # never scale force below this, even fully depleted
+
+_LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajectory
 
 
 @dataclass
@@ -199,9 +201,8 @@ class Runtime:
         follower. Raises ``KeyError`` if ``id`` was never recorded."""
         with self._lock:
             buf = self._trajectories[id]
-        points = [(sample["t"], np.asarray(sample["pose"], dtype=float)) for sample in buf]
-        self.set_plotter_trajectory(points)
-        self.set_mode(Mode.PLOTTER)
+        points = [(float(s["t"]), np.asarray(s["pose"], dtype=float)) for s in buf]
+        self._follow(points)
 
     # ------------------------------------------------------------------ trace
 
@@ -213,24 +214,38 @@ class Runtime:
         speed: float,
         laps: int = 1,
     ) -> None:
-        """Build a lead-in ramp from the current pose to a shapes.path_points
-        path and feed it to the PLOTTER trajectory follower."""
         if shape not in SHAPES:
             raise ValueError(f"unknown shape {shape!r}; expected one of {SHAPES}")
-
-        q, _q_dot = (np.asarray(a, dtype=float) for a in self._link.joint_state())
-        pose0 = forward(q, self._cfg.geo)
-
-        centre_xy = np.asarray(centre, dtype=float)
+        pose0 = self._current_pose()
         dt = 1.0 / self._cfg.control_rate_hz
-        path = path_points(shape, size_m, centre_xy, speed, dt, laps=laps, start_xy=pose0)
+        path = path_points(shape, size_m, np.asarray(centre, dtype=float), speed, dt,
+                           laps=laps, start_xy=pose0)
+        self._follow([(float(t), np.array([x, y])) for t, x, y in path])
 
-        lead_in_s = 2.0
-        points: list[tuple[float, np.ndarray]] = [(0.0, pose0)]
-        for t, x, y in path:
-            points.append((lead_in_s + float(t), np.array([x, y])))
+    def _current_pose(self) -> np.ndarray:
+        q, _ = (np.asarray(a, dtype=float) for a in self._link.joint_state())
+        return forward(q, self._cfg.geo)
 
-        self.set_plotter_trajectory(points)
+    def _follow(self, points: list[tuple[float, np.ndarray]]) -> None:
+        # Validate up front: an Unreachable raised mid-flight would kill the loop.
+        # Strided (paths are smooth) -- a full per-point IK+SVD pass over a long
+        # take hogs the GIL long enough to overrun the control loop.
+        geo, thr = self._cfg.geo, self._cfg.sigma_min_threshold
+        stride = max(1, len(points) // 200)
+        for t, p in points[::stride] + points[-1:]:
+            try:
+                q = inverse(p, geo, elbow=self._cfg.elbow)
+            except Unreachable:
+                raise ValueError(f"path leaves reach at t={t:.2f}s: ({p[0]:.3f}, {p[1]:.3f})")
+            if min_singular_value(q, geo) < thr:
+                raise ValueError(
+                    f"path too close to a singularity at t={t:.2f}s: ({p[0]:.3f}, {p[1]:.3f})"
+                )
+        # An instantaneous anchor step saturates the position loop into a relay
+        # cycle (2026-09-04), so every trajectory gets a ramp from the current pose.
+        pose0 = self._current_pose()
+        ramped = [(0.0, pose0)] + [(_LEAD_IN_S + t, p) for t, p in points]
+        self.set_plotter_trajectory(ramped)
         self.set_mode(Mode.PLOTTER)
 
     # ------------------------------------------------------------------ props
@@ -265,8 +280,15 @@ class Runtime:
         self._thread.start()
 
     def engage(self) -> None:
-        """UI-initiated arm: enter closed-loop control. Exceptions from the
-        link propagate uncaught -- the caller (web.py) reports them."""
+        """UI-initiated arm. Exceptions from the link propagate uncaught --
+        the caller (web.py) reports them."""
+        # Same order as the bring-up scripts: limits + controller mode, park the
+        # anchor on the current angle at zero gain, *then* commutate -- entering
+        # closed loop against a stale input_pos lunges toward it.
+        enter = getattr(self._backend, "enter", None)
+        if callable(enter):
+            enter()
+        self._backend.relax()
         fn = getattr(self._link, "enter_closed_loop", None)
         if callable(fn):
             fn()

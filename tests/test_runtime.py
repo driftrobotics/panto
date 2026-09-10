@@ -117,7 +117,7 @@ def test_mode_transitions():
     assert rt.mode is Mode.INTERACTIVE
     rt.step(dt=0.005)
     assert rt.mode is Mode.INTERACTIVE
-    assert backend.entered == 1
+    assert backend.entered == 2      # once by engage(), once on mode entry
     rt.set_mode(Mode.TRANSPARENT)
     rt.step(dt=0.005)
     assert rt.mode is Mode.TRANSPARENT
@@ -360,6 +360,74 @@ def test_record_start_stop_and_playback_round_trip():
 
     rt.playback("last")
     assert rt.mode is Mode.PLOTTER
+
+
+def test_played_back_trajectories_ramp_in_from_the_current_pose():
+    rt, cfg, link, _, clock = make()
+    rt.record_start()
+    rt.step(dt=0.005)
+    rt.record_stop()
+    link.q = np.array([0.6, 1.3])                       # arm moved since the take
+    rt.playback("last")
+    traj = rt._trajectory
+    assert traj[0][0] == 0.0
+    assert np.allclose(traj[0][1], forward(link.q, cfg.geo))
+    assert traj[1][0] == pytest.approx(2.0)             # first recorded sample after the ramp
+    assert np.allclose(traj[1][1], forward(GOOD_Q, cfg.geo))
+
+    rt.trace_shape("circle", 0.02, forward(link.q, cfg.geo), 0.01)
+    traj = rt._trajectory
+    assert traj[0][0] == 0.0 and np.allclose(traj[0][1], forward(link.q, cfg.geo))
+    assert traj[1][0] == pytest.approx(2.0)
+
+
+def test_engage_parks_the_anchor_before_commutating():
+    """Entering closed loop against a stale input_pos lunges toward it, so
+    engage() must configure + relax the backend *before* enter_closed_loop."""
+    order: list[str] = []
+
+    class ArmingLink(FakeLink):
+        def set_input_pos(self, node_id, q):
+            order.append("park")
+
+        def set_pos_gain(self, node_id, gain):
+            order.append("gain")
+
+        def enter_closed_loop(self, timeout=5.0):
+            order.append("commutate")
+
+    class OrderedBackend(FakeBackend):
+        def enter(self):
+            order.append("enter")
+
+        def relax(self):
+            order.append("relax")
+
+    rt = Runtime(Config.load(), ArmingLink(), OrderedBackend())
+    rt.engage()
+    assert order.index("enter") < order.index("relax") < order.index("commutate")
+
+
+def test_engage_failure_leaves_runtime_unarmed():
+    class RefusingLink(FakeLink):
+        def enter_closed_loop(self, timeout=5.0):
+            raise RuntimeError("refusing to arm")
+
+    rt = Runtime(Config.load(), RefusingLink(), FakeBackend())
+    with pytest.raises(RuntimeError):
+        rt.engage()
+    assert rt.telemetry()["closed_loop"] is False
+
+
+def test_trajectories_are_validated_before_they_are_followed():
+    rt, cfg, _, _, _ = make()
+    reach = cfg.geo.l1 + cfg.geo.l2
+    with pytest.raises(ValueError, match="leaves reach"):
+        rt.trace_shape("line", 0.04, [reach + 0.05, 0.0], 0.01)
+    with pytest.raises(ValueError, match="singularity"):
+        rt.trace_shape("circle", 0.01, [reach * 0.999, 0.0], 0.01)
+    assert rt.mode is Mode.TRANSPARENT
+    assert rt._trajectory == []
 
 
 def test_playback_unknown_id_raises_keyerror():
