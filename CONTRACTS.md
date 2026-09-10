@@ -353,12 +353,15 @@ sends `{type:"clear_errors"}`. Read `state.workspace` (below) and draw the bound
   `POST /api/config` body = partial JSON → deep-merged into `config.local.json`, response
   `{"ok": true, "restart_required": true}`. Validate by round-tripping through
   `Config.load()` on the merged result before writing. Do **not** edit `config.py`.
-- `GET /api/calibration/raw` → `{"turns": [t0, t1], "q_deg": [..], "pose_mm": [..],
-  "closed_loop": bool}` from `link.raw_turns()` (new, read-only) + `joint_state()`.
-- `POST /api/calibration/zero`: arm held straight (q = 0, 0). Per motor
-  `zero_offset_rad = -s·2π·turns`, `s = -1 if flip else 1` (the 2026-09-04 recipe);
-  writes `motors[i].zero_offset_rad` into `calibration.json`, preserving every other key.
-- `POST /api/calibration/limit {"motor": i, "end": "min"|"max"}`: records current `q[i]`
+- `GET /api/calibration/raw` → `{"raw_turns": [t0, t1], "q_rad": [..], "q_deg": [..],
+  "tip_mm": [..], "closed_loop": bool}` from `link.raw_turns()` (read-only) + `joint_state()`.
+  JSON responses sanitise `±inf`/`nan` to the strings `"inf"`/`"-inf"`/`"nan"` (uncalibrated
+  limits default to ±inf, which `JSON.parse` rejects).
+- `POST /api/calibration/zero {"q_target_deg": [0, 0]}` (default): arm held straight — full
+  extension is `(2L, 0)`. Per motor `zero_offset_rad = q_target - s·2π·turns`,
+  `s = -1 if flip else 1` (the 2026-09-04 recipe); writes `motors[i].zero_offset_rad` into
+  the live file, preserving every other key.
+- `POST /api/calibration/limit {"motor": i, "bound": "min"|"max"}`: records current `q[i]`
   as `q_min_rad`/`q_max_rad` for that motor.
 - `POST /api/calibration/workspace {"polygon": [[x,y],...]}` → `workspace_polygon`.
 - All calibration POSTs refuse with 409 while `closed_loop` is true (passive only).

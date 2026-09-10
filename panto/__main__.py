@@ -25,6 +25,10 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="panto", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--sim", action="store_true", help="run against the in-process simulator")
+    p.add_argument("--sim-plant", help="--sim only: plant_model.json (scripts/sysid.py) "
+                                       "shaping both axes' SimParams")
+    p.add_argument("--sim-coupled", action="store_true",
+                   help="--sim only: integrate both axes as one 2R arm")
     p.add_argument("--interface", help="python-can interface (overrides config)")
     p.add_argument("--channel", help="CAN channel (overrides config)")
     p.add_argument("--config", help="path to a live-override config json")
@@ -46,7 +50,11 @@ def main() -> None:
     if args.channel:
         config.can.channel = args.channel
 
-    link = CanLink(config, sim=args.sim)
+    sim_params = None
+    if args.sim_plant:
+        from .sim import SimParams
+        sim_params = SimParams.from_plant_model(args.sim_plant)
+    link = CanLink(config, sim=args.sim, sim_params=sim_params, sim_coupled=args.sim_coupled)
     backend = _BACKENDS[args.backend](link, config)
     runtime = Runtime(config, link, backend)
 
@@ -54,7 +62,7 @@ def main() -> None:
              "sim" if args.sim else f"{config.can.interface}/{config.can.channel}")
     runtime.start()
     try:
-        WebServer(runtime, host=args.host, port=args.port, link=link).run()
+        WebServer(runtime, host=args.host, port=args.port, link=link, config=config).run()
     finally:
         runtime.stop()
 

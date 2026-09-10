@@ -6,25 +6,38 @@ so protocol bugs surface without a bench. The sim therefore talks over a
 `can.Bus(interface="virtual")` rather than exposing a Python API to `CanLink`.
 
 Physics per node (milestone-2 fidelity, not "feel" fidelity):
-  * rigid rotor + viscous damping + Coulomb friction deadband
+  * rigid rotor + viscous damping + Coulomb friction deadband, optionally a
+    torsion spring (models the shoulder's cable-harness spring found in
+    2026-09 sysid) and a pure FIFO delay on the controller's torque output
+    (models the measured drive-side estimator + transport latency)
   * ODrive's cascade — pos P -> vel PI -> torque, then current clamp — at 8 kHz
   * 12-bit MA702 quantisation + an encoder PLL for the velocity estimate
 Quantisation is not cosmetic: on hardware it is what caps usable `vel_gain`
 (Colgate-Brown), so it must be in the loop the host tunes against.
+`SimParams.from_plant_model` builds a `SimParams` straight from a
+`scripts/sysid.py::_write_plant_model` output (amps -> N.m via a supplied
+`torque_constant`, nulls fall back to the class defaults).
 
-TODO (stretch, spec "coupled 2R inertia-matrix dynamics"): the two rotors are
-currently independent. Real panto has an off-diagonal inertia term M12(q2) and
-Coriolis coupling, so fast shoulder motion should back-drive the elbow. Add a
-shared `_couple(q, qdot)` step in `_physics_loop` that solves `M(q) qddot = tau`
-before this is used for anything past a point-hold. Independent rotors are fine
-for bring-up (milestone 2 = static point hold).
+Coupled 2R dynamics (`PantoSim(..., coupled=True)`, opt-in — independent
+rotors, unchanged, remain the default): the per-axis controller/estimator/
+encoder/friction code path (`_AxisPlant._tick_common`) is shared between both
+modes; only the last torque -> acceleration step differs, swapping the
+per-axis scalar divide for a `M(q) qddot + C(q, qdot) qdot = tau` solve
+(`_inertia_matrix` + `PantoSim._step_coupled`). Point-mass links (mass `m1`/
+`m2` concentrated at `com1`/`com2` from their own joint) — link 1's physical
+length isn't its own field; COM is "mid-link" by convention, so `2*com1`
+stands in for it, exact at the 30 g/62.5 mm defaults (125 mm links, matching
+the real arm). Each axis's own `inertia` (rotor) stays on the matrix diagonal
+only, per the "rotor inertia kept as-is" spec — no off-diagonal rotor term.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,6 +77,57 @@ class SimParams:
     encoder_bits: int = 12           # onboard MA702
     encoder_bandwidth: float = 1000.0  # PLL bw, rad/s
 
+    #: N.m/rad-equivalent torsion spring, expressed as A/rad (x torque_constant
+    #: to get N.m/rad) -- 0 disables it. Models the shoulder cable-harness
+    #: spring found in 2026-09 sysid (~3 A/rad). Torque = -k*(angle-home)*Kt,
+    #: applied on the plant (i.e. even while IDLE -- it's mechanical).
+    torsion_a_per_rad: float = 0.0
+    #: When set (A), overrides `friction` as the Coulomb deadband via
+    #: coulomb_a * torque_constant. None (default) -> use `friction` as-is.
+    coulomb_a: float | None = None
+    #: FIFO delay applied to the controller's torque output only (not the
+    #: external "hand" torque), rounded to the nearest control_dt tick.
+    delay_s: float = 0.0
+
+    # -- coupled 2R arm dynamics (only read when PantoSim(coupled=True)) ----
+    m1: float = 0.03    # kg, link 1 mass
+    m2: float = 0.03    # kg, link 2 mass
+    com1: float = 0.0625  # m, link-1 COM distance from joint 1 (mid-link default)
+    com2: float = 0.0625  # m, link-2 COM distance from joint 2 (mid-link default)
+
+    @classmethod
+    def from_plant_model(cls, path: str | Path, *, torque_constant: float = 0.02235) -> SimParams:
+        """Build a `SimParams` from a `scripts/sysid.py::_write_plant_model`
+        JSON file (amps -> N.m via `torque_constant`; that script deliberately
+        works in amps since the drive's own Kt is unverified). Any field the
+        sysid run didn't produce (or landed as JSON `null`, e.g. a direction
+        that never ran) is skipped and the class default is kept."""
+        data = json.loads(Path(path).read_text())
+        kwargs: dict = {"torque_constant": torque_constant}
+
+        inertia_a = data.get("inertia_a_s2_per_rad")
+        if inertia_a is not None:
+            kwargs["inertia"] = float(inertia_a) * torque_constant
+
+        viscous = [v for v in (data.get("viscous_a_per_rad_s") or {}).values() if v is not None]
+        if viscous:
+            kwargs["damping"] = (sum(viscous) / len(viscous)) * torque_constant
+
+        kinetic = [v for v in (data.get("friction_kinetic_intercept_a") or {}).values()
+                  if v is not None]
+        if kinetic:
+            kwargs["coulomb_a"] = sum(kinetic) / len(kinetic)
+
+        delay_s = data.get("delay_s")
+        if delay_s is not None:
+            kwargs["delay_s"] = float(delay_s)
+
+        torsion = data.get("torsion_a_per_rad")
+        if torsion is not None:
+            kwargs["torsion_a_per_rad"] = float(torsion)
+
+        return cls(**kwargs)
+
 
 class _AxisPlant:
     """Pure plant + ODrive controller for one node. No threads, no bus."""
@@ -78,6 +142,14 @@ class _AxisPlant:
         self.angle = home_rad   # rad
         self.velocity = 0.0     # rad/s
         self._external_torque = 0.0  # N·m — "the user's hand"
+        self._home_rad = home_rad    # torsion spring's rest angle
+
+        # controller-torque FIFO delay, in whole control_dt ticks (0 = none,
+        # the default -- see _delayed_controller_torque)
+        self._delay_ticks = (
+            round(params.delay_s / params.control_dt) if params.control_dt else 0
+        )
+        self._torque_queue: deque[float] = deque()
 
         # controller state
         self.axis_state = AXIS_STATE_IDLE
@@ -128,36 +200,65 @@ class _AxisPlant:
     # -- physics ----------------------------------------------------------
 
     def step(self, n_ticks: int) -> None:
+        """Independent-rotor integration: shared per-tick torque computation
+        (`_tick_common`), then a scalar torque -> acceleration divide. This is
+        the only place `coupled=False` differs from `PantoSim._step_coupled`
+        (a matrix solve) -- everything upstream of the divide is identical."""
+        with self._lock:
+            for _ in range(n_ticks):
+                torque = self._tick_common()
+                accel = (torque - self._p.damping * self.velocity) / self._p.inertia
+                self.velocity += accel * self._p.control_dt
+                self.angle += self.velocity * self._p.control_dt
+
+    def _tick_common(self) -> float:
+        """One tick's encoder PLL update + torsion spring + controller torque
+        (through its FIFO delay) + Coulomb deadband. Must be called with
+        `self._lock` already held (both `step` and `PantoSim._step_coupled`
+        do). Returns the net torque, before damping/inertia -- shared by the
+        independent and coupled integration paths (see module docstring)."""
         p = self._p
         dt = p.control_dt
         quantum = TWO_PI / (1 << p.encoder_bits)
-        with self._lock:
-            for _ in range(n_ticks):
-                measured = round(self.angle / quantum) * quantum
+        measured = round(self.angle / quantum) * quantum
 
-                # Encoder PLL: 2nd-order tracker on the quantised angle. Same
-                # structure ODrive runs; gives a smoothed velocity estimate.
-                err = measured - self._est_pos
-                self._est_pos += p.encoder_bandwidth * err * dt
-                self._est_vel += (p.encoder_bandwidth ** 2) * err * dt
-                self._est_pos += self._est_vel * dt
+        # Encoder PLL: 2nd-order tracker on the quantised angle. Same
+        # structure ODrive runs; gives a smoothed velocity estimate.
+        err = measured - self._est_pos
+        self._est_pos += p.encoder_bandwidth * err * dt
+        self._est_vel += (p.encoder_bandwidth ** 2) * err * dt
+        self._est_pos += self._est_vel * dt
 
-                torque = self._external_torque
-                self._last_current = 0.0
-                if self.axis_state == AXIS_STATE_CLOSED_LOOP_CONTROL:
-                    ct = self._controller_torque(dt)
-                    torque += ct
-                    self._last_current = ct / p.torque_constant
+        torque = self._external_torque
+        if p.torsion_a_per_rad:
+            torque += -p.torsion_a_per_rad * (self.angle - self._home_rad) * p.torque_constant
+        self._last_current = 0.0
+        if self.axis_state == AXIS_STATE_CLOSED_LOOP_CONTROL:
+            ct = self._delayed_controller_torque(dt)
+            torque += ct
+            self._last_current = ct / p.torque_constant
 
-                # Coulomb friction as a deadband on net torque.
-                if abs(self.velocity) < 1e-4 and abs(torque) < p.friction:
-                    torque = 0.0
-                else:
-                    torque -= math.copysign(p.friction, self.velocity)
+        # Coulomb friction as a deadband on net torque. `coulomb_a`, when
+        # set, overrides the fixed N.m `friction` default.
+        friction = p.coulomb_a * p.torque_constant if p.coulomb_a is not None else p.friction
+        if abs(self.velocity) < 1e-4 and abs(torque) < friction:
+            torque = 0.0
+        else:
+            torque -= math.copysign(friction, self.velocity)
+        return torque
 
-                accel = (torque - p.damping * self.velocity) / p.inertia
-                self.velocity += accel * dt
-                self.angle += self.velocity * dt
+    def _delayed_controller_torque(self, dt: float) -> float:
+        """`_controller_torque`'s output, shifted `self._delay_ticks` ticks
+        via a FIFO. `delay_ticks <= 0` (the default) bypasses the queue
+        entirely so the zero-delay path is arithmetically identical to before
+        this existed."""
+        ct = self._controller_torque(dt)
+        if self._delay_ticks <= 0:
+            return ct
+        self._torque_queue.append(ct)
+        if len(self._torque_queue) > self._delay_ticks:
+            return self._torque_queue.popleft()
+        return 0.0
 
     def _controller_torque(self, dt: float) -> float:
         p = self._p
@@ -195,6 +296,27 @@ class _AxisPlant:
             return self.angle
 
 
+def _inertia_matrix(q2: float, p: SimParams, inertia0: float, inertia1: float) -> tuple[float, float, float]:
+    """(M11, M12, M22) for a serial 2R arm — point-mass links (`m1`/`m2`
+    concentrated at `com1`/`com2` from their own joint) plus each axis's own
+    rotor `inertia` on the diagonal only (no off-diagonal rotor term, per the
+    "rotor inertia kept as-is" spec). Standard 2-link-planar-manipulator
+    result (e.g. Spong, *Robot Modeling and Control*); M12 == M21 always, by
+    construction of a Lagrangian mass matrix.
+
+    Link 1's full length has no dedicated field -- COM is "mid-link" by
+    convention, so `2*com1` stands in for it. Exact at the class defaults
+    (30 g / 62.5 mm, i.e. 125 mm links, matching the real arm).
+    """
+    l1 = 2.0 * p.com1
+    m1, m2, lc1, lc2 = p.m1, p.m2, p.com1, p.com2
+    cos_q2 = math.cos(q2)
+    m11 = inertia0 + m1 * lc1 * lc1 + m2 * (l1 * l1 + lc2 * lc2 + 2.0 * l1 * lc2 * cos_q2)
+    m12 = m2 * (lc2 * lc2 + l1 * lc2 * cos_q2)
+    m22 = inertia1 + m2 * lc2 * lc2
+    return m11, m12, m22
+
+
 # cmd id -> base message name the sim understands from the host
 _HOST_COMMANDS = {
     CMD["Set_Axis_State"]: "Set_Axis_State",
@@ -218,16 +340,23 @@ class PantoSim:
 
     bus: can.BusABC
     node_ids: tuple[int, int] = (0, 1)
-    params: SimParams = field(default_factory=SimParams)
+    #: One `SimParams` for both axes, or a `(shoulder, elbow)` 2-tuple so they
+    #: can differ. Single-params call sites keep working unchanged.
+    params: SimParams | tuple[SimParams, SimParams] = field(default_factory=SimParams)
     dbc_path: Path = DEFAULT_DBC
     #: motor-shaft power-up angle per node (rad); CanLink sets this in --sim
     home_rad: tuple[float, float] = (0.0, 0.0)
+    #: When True, integrate both plants as one 2R arm (M(q) + Coriolis) instead
+    #: of two independent rotors. See module docstring / `_step_coupled`.
+    coupled: bool = False
 
     def __post_init__(self) -> None:
         self._db = cantools.database.load_file(str(self.dbc_path))
         self._msg_cache: dict[tuple[int, str], object] = {}
+        axis_params = self.params if isinstance(self.params, tuple) else (self.params, self.params)
+        self._axis_params: tuple[SimParams, SimParams] = axis_params  # type: ignore[assignment]
         self._plants = {
-            nid: _AxisPlant(self.params, self.home_rad[i])
+            nid: _AxisPlant(axis_params[i], self.home_rad[i])
             for i, nid in enumerate(self.node_ids)
         }
         self._stop = threading.Event()
@@ -280,18 +409,59 @@ class PantoSim:
 
     def _physics_loop(self) -> None:
         # 8 kHz of Python would burn a core; step in batches and pace to wall.
+        # Timing cadence (control_dt) is shared across axes even when their
+        # SimParams differ -- taken from node_ids[0]'s params.
         batch = 40
-        dt = self.params.control_dt
+        dt = self._axis_params[0].control_dt
         next_t = time.perf_counter()
         while not self._stop.is_set():
-            for plant in self._plants.values():
-                plant.step(batch)
+            if self.coupled:
+                self._step_coupled(batch)
+            else:
+                for plant in self._plants.values():
+                    plant.step(batch)
             next_t += dt * batch
             sleep = next_t - time.perf_counter()
             if sleep > 0:
                 time.sleep(sleep)
             else:
                 next_t = time.perf_counter()
+
+    def _step_coupled(self, n_ticks: int) -> None:
+        """2R-arm integration: `_AxisPlant._tick_common` (shared with the
+        independent path) supplies each axis's net torque; the difference is
+        the last step, a `M(q) qddot + C(q,qdot) qdot = tau` solve instead of
+        a per-axis scalar divide. `node_ids[0]` is link 1 (shoulder, q1),
+        `node_ids[1]` is link 2 (elbow, q2), matching `home_rad`'s order.
+        Arm geometry (`m1/m2/com1/com2`) is read from `node_ids[0]`'s
+        SimParams only -- see the `params` field docstring: pass one SimParams
+        for both axes (the common case) and this is unambiguous."""
+        p0 = self._axis_params[0]
+        dt = p0.control_dt
+        plant0, plant1 = (self._plants[nid] for nid in self.node_ids)
+        l1 = 2.0 * p0.com1
+        m2, lc2 = p0.m2, p0.com2
+        d0, d1 = self._axis_params[0].damping, self._axis_params[1].damping
+        i0, i1 = self._axis_params[0].inertia, self._axis_params[1].inertia
+        for _ in range(n_ticks):
+            with plant0._lock, plant1._lock:
+                tau0 = plant0._tick_common()
+                tau1 = plant1._tick_common()
+                q2 = plant1.angle
+                qd1, qd2 = plant0.velocity, plant1.velocity
+
+                m11, m12, m22 = _inertia_matrix(q2, p0, i0, i1)
+                h = -m2 * l1 * lc2 * math.sin(q2)
+                rhs0 = tau0 - h * (2.0 * qd1 * qd2 + qd2 * qd2) - d0 * qd1
+                rhs1 = tau1 + h * qd1 * qd1 - d1 * qd2
+                det = m11 * m22 - m12 * m12
+                qdd1 = (rhs0 * m22 - m12 * rhs1) / det
+                qdd2 = (m11 * rhs1 - m12 * rhs0) / det
+
+                plant0.velocity += qdd1 * dt
+                plant0.angle += plant0.velocity * dt
+                plant1.velocity += qdd2 * dt
+                plant1.angle += plant1.velocity * dt
 
     def _rx_loop(self) -> None:
         while not self._stop.is_set():
@@ -319,7 +489,10 @@ class PantoSim:
             plant.apply_command(base_name, dict(signals))
 
     def _tx_loop(self) -> None:
-        p = self.params
+        # Cyclic message cadence is shared across axes even when their
+        # SimParams differ -- taken from node_ids[0]'s params (same rationale
+        # as _physics_loop's dt).
+        p = self._axis_params[0]
         next_enc = next_hb = next_iq = time.perf_counter()
         while not self._stop.is_set():
             now = time.perf_counter()

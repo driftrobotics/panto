@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>panto — settings</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#161a22; --line:#262c38; --text:#e6e9ef; --muted:#8b93a3;
+    --dot:#5064c8; --warn:#d4763a; --ok:#4ba36a; --bad:#b4453f;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:flex; justify-content:center; padding:24px;
+  }
+  main { width:100%; max-width:720px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .hint { color:var(--muted); font-size:12px; margin:0 0 18px; }
+  nav { margin:0 0 18px; font-size:13px; }
+  nav a { color:var(--dot); text-decoration:none; margin-right:14px; }
+  nav a:hover { text-decoration:underline; }
+  section {
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:16px 18px; margin-bottom:16px;
+  }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px; font-weight:600; }
+  .row { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:10px; }
+  .field { display:flex; flex-direction:column; gap:4px; }
+  label { font-size:12px; color:var(--muted); }
+  input[type="number"] {
+    padding:6px 8px; background:var(--bg); color:var(--text);
+    border:1px solid var(--line); border-radius:6px; font:inherit; font-size:13px; width:130px;
+  }
+  input[type="checkbox"] { width:16px; height:16px; }
+  .checkbox-field { flex-direction:row; align-items:center; gap:6px; }
+  .motor-block { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+  .motor-block:first-child { border-top:none; padding-top:0; margin-top:0; }
+  .motor-title { font-size:12px; color:var(--text); font-weight:600; margin-bottom:8px; }
+  button {
+    display:inline-block; padding:8px 16px; background:transparent; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; cursor:pointer; font:inherit; font-size:13px;
+  }
+  button:hover { border-color:#3a4152; background:#1c212b; }
+  button.primary { border-color:var(--dot); background:#1a1f33; }
+  #notice {
+    border:1px solid var(--warn); border-radius:6px; padding:10px 14px; margin-bottom:16px;
+    color:var(--warn); font-size:13px; display:none;
+  }
+  #notice.show { display:block; }
+  #save-status { margin-top:10px; font-size:13px; }
+  #save-status.ok { color:var(--ok); }
+  #save-status.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <nav><a href="/">arm</a><a href="/calibrate">calibrate</a><a href="/settings">settings</a></nav>
+  <h1>Settings</h1>
+  <p class="hint">Offline config editor. Saving writes the live-override JSON file; the running panto process must be restarted to pick it up.</p>
+  <div id="notice">Unsaved changes will require a process restart to take effect once saved.</div>
+
+  <section>
+    <h2>Geometry</h2>
+    <div class="row">
+      <div class="field"><label>l1 (m)</label><input type="number" step="0.001" id="geo-l1"></div>
+      <div class="field"><label>l2 (m)</label><input type="number" step="0.001" id="geo-l2"></div>
+    </div>
+  </section>
+
+  <section id="motors">
+    <h2>Motors</h2>
+    <!-- filled per motor -->
+  </section>
+
+  <section>
+    <h2>Control</h2>
+    <div class="row">
+      <div class="field"><label>stiffness (N/m)</label><input type="number" step="1" id="ctl-stiffness"></div>
+      <div class="field"><label>wall stiffness (N/m)</label><input type="number" step="1" id="ctl-wall-stiffness"></div>
+      <div class="field"><label>force limit (N)</label><input type="number" step="0.1" id="ctl-force-limit"></div>
+      <div class="field"><label>rate (Hz)</label><input type="number" step="1" id="ctl-rate"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Misc</h2>
+    <div class="row">
+      <div class="field"><label>sigma_min_threshold</label><input type="number" step="0.001" id="sigma-min"></div>
+      <div class="field"><label>heartbeat_timeout_s</label><input type="number" step="0.1" id="heartbeat-timeout"></div>
+    </div>
+  </section>
+
+  <button id="save-btn" class="primary">Save</button>
+  <span id="save-status"></span>
+</main>
+
+<script>
+const motorFieldIds = ['flip', 'zero_offset_rad', 'current_soft_max', 'vel_gain', 'torque_constant'];
+
+function motorBlockHtml(i) {
+  return `
+    <div class="motor-block" data-motor="${i}">
+      <div class="motor-title">motor ${i}</div>
+      <div class="row">
+        <div class="field checkbox-field">
+          <input type="checkbox" id="m${i}-flip">
+          <label for="m${i}-flip">flip</label>
+        </div>
+        <div class="field"><label>zero_offset_rad</label><input type="number" step="0.0001" id="m${i}-zero_offset_rad"></div>
+        <div class="field"><label>current_soft_max (A)</label><input type="number" step="0.01" id="m${i}-current_soft_max"></div>
+        <div class="field"><label>vel_gain</label><input type="number" step="0.0001" id="m${i}-vel_gain"></div>
+        <div class="field"><label>torque_constant</label><input type="number" step="0.0001" id="m${i}-torque_constant"></div>
+      </div>
+    </div>`;
+}
+
+let currentConfig = null;
+
+function populate(cfg) {
+  currentConfig = cfg;
+  document.getElementById('geo-l1').value = cfg.geo.l1;
+  document.getElementById('geo-l2').value = cfg.geo.l2;
+
+  const host = document.getElementById('motors');
+  host.innerHTML = '<h2>Motors</h2>' + cfg.motors.map((_, i) => motorBlockHtml(i)).join('');
+  cfg.motors.forEach((m, i) => {
+    document.getElementById(`m${i}-flip`).checked = !!m.flip;
+    document.getElementById(`m${i}-zero_offset_rad`).value = m.zero_offset_rad;
+    document.getElementById(`m${i}-current_soft_max`).value = m.current_soft_max;
+    document.getElementById(`m${i}-vel_gain`).value = m.vel_gain;
+    document.getElementById(`m${i}-torque_constant`).value = m.torque_constant;
+  });
+
+  document.getElementById('ctl-stiffness').value = cfg.control.stiffness_n_per_m;
+  document.getElementById('ctl-wall-stiffness').value = cfg.control.wall_stiffness_n_per_m;
+  document.getElementById('ctl-force-limit').value = cfg.control.force_limit_n;
+  document.getElementById('ctl-rate').value = cfg.control.rate_hz;
+
+  document.getElementById('sigma-min').value = cfg.sigma_min_threshold;
+  document.getElementById('heartbeat-timeout').value = cfg.heartbeat_timeout_s;
+}
+
+async function load() {
+  const resp = await fetch('/api/config');
+  const cfg = await resp.json();
+  populate(cfg);
+}
+
+function buildPatch() {
+  const motors = currentConfig.motors.map((m, i) => ({
+    node_id: m.node_id,
+    flip: document.getElementById(`m${i}-flip`).checked,
+    zero_offset_rad: parseFloat(document.getElementById(`m${i}-zero_offset_rad`).value),
+    current_soft_max: parseFloat(document.getElementById(`m${i}-current_soft_max`).value),
+    vel_gain: parseFloat(document.getElementById(`m${i}-vel_gain`).value),
+    torque_constant: parseFloat(document.getElementById(`m${i}-torque_constant`).value),
+  }));
+  return {
+    geo: {
+      l1: parseFloat(document.getElementById('geo-l1').value),
+      l2: parseFloat(document.getElementById('geo-l2').value),
+    },
+    motors,
+    control: {
+      stiffness_n_per_m: parseFloat(document.getElementById('ctl-stiffness').value),
+      wall_stiffness_n_per_m: parseFloat(document.getElementById('ctl-wall-stiffness').value),
+      force_limit_n: parseFloat(document.getElementById('ctl-force-limit').value),
+      rate_hz: parseFloat(document.getElementById('ctl-rate').value),
+    },
+    sigma_min_threshold: parseFloat(document.getElementById('sigma-min').value),
+    heartbeat_timeout_s: parseFloat(document.getElementById('heartbeat-timeout').value),
+  };
+}
+
+const statusEl = document.getElementById('save-status');
+const noticeEl = document.getElementById('notice');
+
+document.getElementById('save-btn').onclick = async () => {
+  statusEl.textContent = 'saving…';
+  statusEl.className = '';
+  const patch = buildPatch();
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      statusEl.textContent = 'saved — restart panto for changes to take effect.';
+      statusEl.className = 'ok';
+      noticeEl.classList.add('show');
+      populate(data.config);
+    } else {
+      statusEl.textContent = 'error: ' + (data.error || resp.statusText);
+      statusEl.className = 'bad';
+    }
+  } catch (err) {
+    statusEl.textContent = 'error: ' + err;
+    statusEl.className = 'bad';
+  }
+};
+
+load();
+</script>
+</body>
+</html>

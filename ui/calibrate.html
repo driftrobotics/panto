@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>panto — calibrate</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#161a22; --line:#262c38; --text:#e6e9ef; --muted:#8b93a3;
+    --dot:#5064c8; --arm:#5a1297; --anchor:#3aa0d4; --warn:#d4763a; --ok:#4ba36a; --bad:#b4453f;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:grid; grid-template-columns:minmax(0,1fr) 340px; min-height:100vh;
+  }
+  @media (max-width:900px) { body { grid-template-columns:1fr; } }
+  main { padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .hint { color:var(--muted); font-size:12px; margin:0 0 14px; }
+  nav { margin:0 0 18px; font-size:13px; }
+  nav a { color:var(--dot); text-decoration:none; margin-right:14px; }
+  nav a:hover { text-decoration:underline; }
+  aside { background:var(--panel); border-left:1px solid var(--line); padding:20px; overflow-y:auto; }
+  section { margin-bottom:22px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; font-weight:600; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:3px 12px; margin:0 0 12px; font-variant-numeric:tabular-nums; }
+  dt { color:var(--muted); } dd { margin:0; text-align:right; }
+  #arm-state { font-size:12px; padding:4px 10px; border-radius:6px; display:inline-block; margin-bottom:14px; }
+  #arm-state.passive { color:var(--ok); border:1px solid var(--ok); }
+  #arm-state.armed { color:var(--bad); border:1px solid var(--bad); }
+  button {
+    display:inline-block; padding:7px 12px; margin:0 6px 6px 0; background:transparent; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; cursor:pointer; font:inherit; font-size:13px;
+  }
+  button:hover:not(:disabled) { border-color:#3a4152; background:#1c212b; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  canvas { touch-action:none; background:#0a0c10; border:1px solid var(--line); border-radius:8px; cursor:crosshair; }
+  #wp-status { font-size:12px; color:var(--muted); margin-top:8px; }
+  #status-msg { font-size:13px; margin-top:10px; }
+  #status-msg.ok { color:var(--ok); }
+  #status-msg.bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <nav><a href="/">arm</a><a href="/calibrate">calibrate</a><a href="/settings">settings</a></nav>
+  <h1>Calibrate</h1>
+  <p class="hint">Passive activity: motors stay IDLE. Hold the arm at the reference pose by hand, then record. Reads at ~10 Hz.</p>
+  <div id="arm-state" class="passive">passive</div>
+
+  <section>
+    <h2>Live readout</h2>
+    <dl>
+      <dt>raw turns</dt><dd id="r-turns">–</dd>
+      <dt>q (deg)</dt><dd id="r-qdeg">–</dd>
+      <dt>tip (mm)</dt><dd id="r-tip">–</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Zero</h2>
+    <p class="hint">Hold the arm straight (or at a known pose), then set zero so the current raw reading maps to the target below.</p>
+    <label class="hint">target q1 (deg) <input id="zero-q1" type="number" step="1" value="0" style="width:70px"></label>
+    <label class="hint">target q2 (deg) <input id="zero-q2" type="number" step="1" value="0" style="width:70px"></label>
+    <div><button id="btn-zero">Set zero (arm straight)</button></div>
+  </section>
+
+  <section>
+    <h2>Joint limits</h2>
+    <div>
+      motor 0:
+      <button id="btn-min-0">record min</button>
+      <button id="btn-max-0">record max</button>
+    </div>
+    <div>
+      motor 1:
+      <button id="btn-min-1">record min</button>
+      <button id="btn-max-1">record max</button>
+    </div>
+    <dl style="margin-top:8px">
+      <dt>m0 [min,max] (deg)</dt><dd id="lim-0">–</dd>
+      <dt>m1 [min,max] (deg)</dt><dd id="lim-1">–</dd>
+    </dl>
+  </section>
+
+  <div id="status-msg"></div>
+</main>
+
+<aside>
+  <section>
+    <h2>Workspace polygon</h2>
+    <p class="hint">Click to add points (metres, base at centre). Save when done.</p>
+    <canvas id="wp-canvas" width="280" height="280"></canvas>
+    <div id="wp-status">0 points</div>
+    <div style="margin-top:8px">
+      <button id="wp-clear">Clear</button>
+      <button id="wp-save">Save workspace</button>
+      <button id="wp-load">Load current</button>
+    </div>
+  </section>
+</aside>
+
+<script>
+let geo = { l1: 0.125, l2: 0.125 };
+let armed = false;
+
+const statusEl = document.getElementById('status-msg');
+function showStatus(msg, ok) {
+  statusEl.textContent = msg;
+  statusEl.className = ok ? 'ok' : 'bad';
+}
+
+function setButtonsDisabled(disabled) {
+  ['btn-zero', 'btn-min-0', 'btn-max-0', 'btn-min-1', 'btn-max-1', 'wp-save'].forEach(id => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
+async function pollRaw() {
+  try {
+    const resp = await fetch('/api/calibration/raw');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    document.getElementById('r-turns').textContent = d.raw_turns.map(v => v.toFixed(4)).join(', ');
+    document.getElementById('r-qdeg').textContent = d.q_deg.map(v => v.toFixed(2)).join(', ');
+    document.getElementById('r-tip').textContent = d.tip_mm.map(v => v.toFixed(1)).join(', ');
+
+    armed = !!d.closed_loop;
+    const stateEl = document.getElementById('arm-state');
+    stateEl.textContent = armed ? 'armed' : 'passive';
+    stateEl.className = armed ? 'armed' : 'passive';
+    setButtonsDisabled(armed);
+  } catch (err) {
+    // transient network hiccup; next poll will retry
+  }
+}
+setInterval(pollRaw, 100);
+pollRaw();
+
+async function postJson(path, body) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await resp.json();
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+document.getElementById('btn-zero').onclick = async () => {
+  const q_target_deg = [
+    parseFloat(document.getElementById('zero-q1').value) || 0,
+    parseFloat(document.getElementById('zero-q2').value) || 0,
+  ];
+  const r = await postJson('/api/calibration/zero', { q_target_deg });
+  if (r.ok) showStatus('zero set.', true);
+  else showStatus('error: ' + (r.data.error || r.status), false);
+};
+
+function bindLimitButton(id, motor, bound) {
+  document.getElementById(id).onclick = async () => {
+    const r = await postJson('/api/calibration/limit', { motor, bound });
+    if (r.ok) {
+      showStatus(`motor ${motor} ${bound} recorded.`, true);
+      const el = document.getElementById(`lim-${motor}`);
+      const lo = r.data.q_min_rad, hi = r.data.q_max_rad;
+      // the server sends the JSON-illegal +-inf sentinel as the strings
+      // "inf" / "-inf" (see panto.web._json_safe) rather than a raw float.
+      const fmt = v => (v === 'inf') ? '+inf' : (v === '-inf') ? '-inf' : (v * 180 / Math.PI).toFixed(1);
+      el.textContent = `${fmt(lo)}, ${fmt(hi)}`;
+    } else {
+      showStatus('error: ' + (r.data.error || r.status), false);
+    }
+  };
+}
+bindLimitButton('btn-min-0', 0, 'min');
+bindLimitButton('btn-max-0', 0, 'max');
+bindLimitButton('btn-min-1', 1, 'min');
+bindLimitButton('btn-max-1', 1, 'max');
+
+/* ------------------------------------------------------------ workspace canvas */
+const cv = document.getElementById('wp-canvas'), ctx = cv.getContext('2d');
+const REACH = () => geo.l1 + geo.l2;
+const PX = () => cv.width / (2.4 * REACH());
+const OX = cv.width / 2, OY = cv.height / 2;
+const m2p = (x, y) => [OX + x * PX(), OY - y * PX()];
+const p2m = (px, py) => [(px - OX) / PX(), (OY - py) / PX()];
+
+let points = [];
+
+function drawWp() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.strokeStyle = '#1b2130';
+  ctx.beginPath(); ctx.arc(OX, OY, REACH() * PX(), 0, Math.PI * 2); ctx.stroke();
+
+  if (points.length) {
+    ctx.strokeStyle = 'var(--anchor)'; ctx.fillStyle = '#3aa0d4';
+    ctx.beginPath();
+    points.forEach(([x, y], i) => {
+      const [px, py] = m2p(x, y);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    if (points.length > 2) ctx.closePath();
+    ctx.stroke();
+    points.forEach(([x, y]) => {
+      const [px, py] = m2p(x, y);
+      ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+  document.getElementById('wp-status').textContent = `${points.length} points`;
+}
+
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect();
+  const [mx, my] = p2m(e.clientX - r.left, e.clientY - r.top);
+  points.push([mx, my]);
+  drawWp();
+});
+
+document.getElementById('wp-clear').onclick = () => { points = []; drawWp(); };
+
+document.getElementById('wp-save').onclick = async () => {
+  if (points.length < 3) { showStatus('need at least 3 points.', false); return; }
+  const r = await postJson('/api/calibration/workspace', { polygon: points });
+  if (r.ok) showStatus('workspace saved.', true);
+  else showStatus('error: ' + (r.data.error || r.status), false);
+};
+
+document.getElementById('wp-load').onclick = async () => {
+  const resp = await fetch('/api/config');
+  const cfg = await resp.json();
+  if (cfg.workspace_polygon) {
+    points = cfg.workspace_polygon;
+    drawWp();
+    showStatus('loaded current workspace polygon.', true);
+  } else {
+    showStatus('no workspace polygon set.', false);
+  }
+};
+
+(async () => {
+  const resp = await fetch('/api/config');
+  const cfg = await resp.json();
+  geo = cfg.geo;
+  drawWp();
+})();
+</script>
+</body>
+</html>

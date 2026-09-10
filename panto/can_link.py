@@ -268,9 +268,12 @@ def _open_bus(interface: str, channel: str, bitrate: int) -> can.BusABC:
 class CanLink:
     """Two ODrive Micro axes on one CAN bus. Calibrated joint space in/out."""
 
-    def __init__(self, config, *, sim: bool = False, dbc_path: Path = DEFAULT_DBC) -> None:
+    def __init__(self, config, *, sim: bool = False, dbc_path: Path = DEFAULT_DBC,
+                 sim_params=None, sim_coupled: bool = False) -> None:
         self._config = config
         self._sim_mode = sim
+        self._sim_params = sim_params  # SimParams | (shoulder, elbow) | None
+        self._sim_coupled = sim_coupled
         self._db = cantools.database.load_file(str(dbc_path))
 
         motors = list(config.motors)
@@ -381,7 +384,10 @@ class CanLink:
                 turns_from_joint(SIM_HOME_JOINT_RAD[i], self._flip[i], self._zero[i]) * TWO_PI
                 for i in range(2)
             )
-            self._sim = PantoSim(self._sim_bus, node_ids=self._node_ids, home_rad=home)
+            sim_kwargs = {"node_ids": self._node_ids, "home_rad": home, "coupled": self._sim_coupled}
+            if self._sim_params is not None:
+                sim_kwargs["params"] = self._sim_params
+            self._sim = PantoSim(self._sim_bus, **sim_kwargs)
             self._sim.start()
         else:
             can_if, can_ch, can_br = self._can_settings()
