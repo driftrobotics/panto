@@ -29,6 +29,7 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 from . import constraints as _c
+from .calibration import two_point
 from .config import Config, _LIVE_CANDIDATES
 from .kinematics import forward
 from .runtime import Mode, Runtime
@@ -151,6 +152,7 @@ class WebServer:
         self._app.router.add_post("/api/calibration/zero", self._api_calibration_zero)
         self._app.router.add_post("/api/calibration/limit", self._api_calibration_limit)
         self._app.router.add_post("/api/calibration/workspace", self._api_calibration_workspace)
+        self._app.router.add_post("/api/calibration/two_point", self._api_calibration_two_point)
         self._app.router.add_static("/static", UI_DIR)
         self._app.on_startup.append(self._on_startup)
         self._app.on_cleanup.append(self._on_cleanup)
@@ -431,6 +433,62 @@ class WebServer:
                 else np.asarray(cfg.workspace_polygon).tolist()
             ),
         })
+
+    async def _api_calibration_two_point(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return _json({"error": f"invalid JSON: {exc}"}, status=400)
+        try:
+            t_ext = [float(v) for v in body["extension"]]
+            t_fold = [float(v) for v in body["folded"]]
+        except Exception as exc:  # noqa: BLE001
+            return _json({"error": f"bad request: {exc}"}, status=400)
+        apply = bool(body.get("apply", False))
+
+        result = two_point(t_ext, t_fold)
+        response = {
+            "flip": result["flip"],
+            "zero_offset_rad": result["zero_offset_rad"],
+            "fold_deg": result["fold_deg"],
+            "limits": result["limits"],
+            "warnings": result["warnings"],
+            "applied": False,
+            "restart_required": False,
+        }
+
+        if not apply:
+            return _json(response)
+
+        armed = self._refuse_if_armed()
+        if armed is not None:
+            return armed
+
+        motors = list(self._config.motors)
+        if len(motors) != 2:
+            return _json({"error": "expected exactly two motors"}, status=400)
+        motors_patch = [
+            {
+                "node_id": motors[0].node_id,
+                "flip": result["flip"][0],
+                "zero_offset_rad": result["zero_offset_rad"][0],
+                "q_max_rad": result["limits"]["q0_max_rad"],
+            },
+            {
+                "node_id": motors[1].node_id,
+                "flip": result["flip"][1],
+                "zero_offset_rad": result["zero_offset_rad"][1],
+                "q_min_rad": result["limits"]["q1_min_rad"],
+            },
+        ]
+        try:
+            self._persist_patch({"motors": motors_patch})
+        except Exception as exc:  # noqa: BLE001
+            return _json({"error": str(exc)}, status=400)
+
+        response["applied"] = True
+        response["restart_required"] = True
+        return _json(response)
 
     # ------------------------------------------------------------------ broadcast
 

@@ -41,6 +41,8 @@
   #status-msg { font-size:13px; margin-top:10px; }
   #status-msg.ok { color:var(--ok); }
   #status-msg.bad { color:var(--bad); }
+  #tp-result { font-size:12px; margin-top:8px; white-space:pre-wrap; font-variant-numeric:tabular-nums; }
+  #tp-result.warn { color:var(--warn); }
 </style>
 </head>
 <body>
@@ -65,6 +67,25 @@
     <label class="hint">target q1 (deg) <input id="zero-q1" type="number" step="1" value="0" style="width:70px"></label>
     <label class="hint">target q2 (deg) <input id="zero-q2" type="number" step="1" value="0" style="width:70px"></label>
     <div><button id="btn-zero">Set zero (arm straight)</button></div>
+  </section>
+
+  <section>
+    <h2>Two-point</h2>
+    <p class="hint">Hold at full extension, capture; then hold folded (collision 2), capture. Preview before applying — applying writes flip, zero offset, and joint limits (q0_max, q1_min) for both motors and requires a restart.</p>
+    <div>
+      <button id="tp-btn-ext">Step 1: hold at full extension → Capture</button>
+      <span class="hint" id="tp-ext-val">–</span>
+    </div>
+    <div>
+      <button id="tp-btn-fold">Step 2: hold folded (collision 2) → Capture</button>
+      <span class="hint" id="tp-fold-val">–</span>
+    </div>
+    <div style="margin-top:8px">
+      <button id="tp-btn-preview" disabled>Preview</button>
+      <button id="tp-btn-apply" disabled>Apply</button>
+      <label class="hint"><input type="checkbox" id="tp-apply-anyway"> apply anyway (ignore warnings)</label>
+    </div>
+    <div id="tp-result"></div>
   </section>
 
   <section>
@@ -113,9 +134,11 @@ function showStatus(msg, ok) {
 }
 
 function setButtonsDisabled(disabled) {
-  ['btn-zero', 'btn-min-0', 'btn-max-0', 'btn-min-1', 'btn-max-1', 'wp-save'].forEach(id => {
+  ['btn-zero', 'btn-min-0', 'btn-max-0', 'btn-min-1', 'btn-max-1', 'wp-save',
+   'tp-btn-ext', 'tp-btn-fold'].forEach(id => {
     document.getElementById(id).disabled = disabled;
   });
+  tpRefreshGating();
 }
 
 async function pollRaw() {
@@ -179,6 +202,83 @@ bindLimitButton('btn-min-0', 0, 'min');
 bindLimitButton('btn-max-0', 0, 'max');
 bindLimitButton('btn-min-1', 1, 'min');
 bindLimitButton('btn-max-1', 1, 'max');
+
+/* ------------------------------------------------------------ two-point calibration */
+let tpExt = null, tpFold = null, tpPreview = null;
+
+function tpFmt(a, digits) {
+  return a.map(v => v.toFixed(digits)).join(', ');
+}
+
+function tpRefreshGating() {
+  document.getElementById('tp-btn-preview').disabled = armed || !(tpExt && tpFold);
+  const anyway = document.getElementById('tp-apply-anyway').checked;
+  const clean = !!tpPreview && tpPreview.warnings.length === 0;
+  document.getElementById('tp-btn-apply').disabled = armed || !tpPreview || !(clean || anyway);
+}
+
+async function tpCaptureRaw() {
+  const resp = await fetch('/api/calibration/raw');
+  if (!resp.ok) return null;
+  const d = await resp.json();
+  return d.raw_turns;
+}
+
+document.getElementById('tp-btn-ext').onclick = async () => {
+  const raw = await tpCaptureRaw();
+  if (!raw) { showStatus('capture failed.', false); return; }
+  tpExt = raw;
+  document.getElementById('tp-ext-val').textContent = tpFmt(raw, 5);
+  tpPreview = null;
+  tpRefreshGating();
+};
+
+document.getElementById('tp-btn-fold').onclick = async () => {
+  const raw = await tpCaptureRaw();
+  if (!raw) { showStatus('capture failed.', false); return; }
+  tpFold = raw;
+  document.getElementById('tp-fold-val').textContent = tpFmt(raw, 5);
+  tpPreview = null;
+  tpRefreshGating();
+};
+
+function tpRenderResult(data) {
+  const el = document.getElementById('tp-result');
+  const lines = [
+    `flip: [${data.flip.join(', ')}]`,
+    `zero_offset (rad): [${tpFmt(data.zero_offset_rad, 5)}]`,
+    `fold (deg): [${tpFmt(data.fold_deg, 1)}]`,
+    `limits: q0_max=${(data.limits.q0_max_rad * 180 / Math.PI).toFixed(1)} deg, ` +
+      `q1_min=${(data.limits.q1_min_rad * 180 / Math.PI).toFixed(1)} deg`,
+  ];
+  if (data.warnings.length) {
+    lines.push('warnings:');
+    data.warnings.forEach(w => lines.push('  - ' + w));
+  }
+  el.textContent = lines.join('\n');
+  el.className = data.warnings.length ? 'warn' : '';
+}
+
+document.getElementById('tp-btn-preview').onclick = async () => {
+  const r = await postJson('/api/calibration/two_point', { extension: tpExt, folded: tpFold, apply: false });
+  if (!r.ok) { showStatus('error: ' + (r.data.error || r.status), false); return; }
+  tpPreview = r.data;
+  tpRenderResult(r.data);
+  tpRefreshGating();
+  showStatus('preview ready.', true);
+};
+
+document.getElementById('tp-apply-anyway').onchange = tpRefreshGating;
+
+document.getElementById('tp-btn-apply').onclick = async () => {
+  const r = await postJson('/api/calibration/two_point', { extension: tpExt, folded: tpFold, apply: true });
+  if (!r.ok) { showStatus('error: ' + (r.data.error || r.status), false); return; }
+  tpRenderResult(r.data);
+  tpPreview = null;
+  document.getElementById('tp-apply-anyway').checked = false;
+  tpRefreshGating();
+  showStatus('applied — restart required.', true);
+};
 
 /* ------------------------------------------------------------ workspace canvas */
 const cv = document.getElementById('wp-canvas'), ctx = cv.getContext('2d');

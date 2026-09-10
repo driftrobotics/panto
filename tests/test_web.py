@@ -312,3 +312,92 @@ def test_calibration_workspace_refused_while_armed(isolated_live_file):
     )
 
     assert status == 409
+
+
+# --------------------------------------------------------------------- calibration/two_point
+
+def test_two_point_dry_run_does_not_write(isolated_live_file):
+    cfg = Config()
+    srv, _rt = make_server(config=cfg)
+    body = {
+        "extension": [0.16966, 0.25424],
+        # forward-built from flip=(True, False), fold ~(163.8, -163.6) deg
+        "folded": [-0.28534000000000004, -0.2002044444444444],
+        "apply": False,
+    }
+
+    status, data = run_with_client(
+        srv._app, lambda c: _post(c, "/api/calibration/two_point", body)
+    )
+
+    assert status == 200
+    assert data["flip"] == [True, False]
+    assert data["fold_deg"] == pytest.approx([163.8, -163.6], abs=1e-3)
+    assert data["warnings"] == []
+    assert data["applied"] is False
+    assert data["restart_required"] is False
+    assert not (isolated_live_file / "calibration.json").is_file()
+
+
+def test_two_point_apply_writes_motors_and_limits(isolated_live_file):
+    cfg = Config()
+    srv, _rt = make_server(config=cfg)
+    body = {
+        "extension": [0.16966, 0.25424],
+        "folded": [-0.28534000000000004, -0.2002044444444444],
+        "apply": True,
+    }
+
+    async def run(client):
+        s1, d1 = await _post(client, "/api/calibration/two_point", body)
+        s2, d2 = await _get(client, "/api/config")
+        return s1, d1, s2, d2
+
+    status, data, status2, data2 = run_with_client(srv._app, run)
+
+    assert status == 200
+    assert data["applied"] is True
+    assert data["restart_required"] is True
+
+    m0, m1 = data2["motors"][0], data2["motors"][1]
+    assert m0["flip"] is True and m1["flip"] is False
+    assert m0["zero_offset_rad"] == pytest.approx(data["zero_offset_rad"][0], abs=1e-9)
+    assert m1["zero_offset_rad"] == pytest.approx(data["zero_offset_rad"][1], abs=1e-9)
+    assert m0["q_max_rad"] == pytest.approx(data["limits"]["q0_max_rad"], abs=1e-9)
+    assert m1["q_min_rad"] == pytest.approx(data["limits"]["q1_min_rad"], abs=1e-9)
+
+
+def test_two_point_apply_refused_while_armed(isolated_live_file):
+    srv, _rt = make_server(closed_loop=True, config=Config())
+    body = {"extension": [0.0, 0.0], "folded": [0.4, -0.4], "apply": True}
+
+    status, data = run_with_client(
+        srv._app, lambda c: _post(c, "/api/calibration/two_point", body)
+    )
+
+    assert status == 409
+
+
+def test_two_point_dry_run_allowed_while_armed(isolated_live_file):
+    # preview writes nothing, so it should still work while armed
+    srv, _rt = make_server(closed_loop=True, config=Config())
+    body = {"extension": [0.0, 0.0], "folded": [0.4, -0.4], "apply": False}
+
+    status, data = run_with_client(
+        srv._app, lambda c: _post(c, "/api/calibration/two_point", body)
+    )
+
+    assert status == 200
+    assert data["applied"] is False
+
+
+def test_two_point_surfaces_warnings(isolated_live_file):
+    srv, _rt = make_server(config=Config())
+    body = {"extension": [0.0, 0.0], "folded": [0.01, 0.01], "apply": False}
+
+    status, data = run_with_client(
+        srv._app, lambda c: _post(c, "/api/calibration/two_point", body)
+    )
+
+    assert status == 200
+    assert any("barely moved" in w for w in data["warnings"])
