@@ -298,18 +298,22 @@ contract names above but were never dispatched — this is where they land.
 
 ## Phase 1 — remaining milestones, five parallel streams (2026-09-10)
 
-Coordinator: panto-d8. Another session (hold-torque feedforward: `backends/position.py`,
-`config.py`, `scripts/step_response.py`, `scripts/trace_shape.py`, `tests/test_backends.py`,
-`scripts/fit_hold_ff.py`, `experiments/`) is live in the same tree — **no stream touches those**.
-No stream runs anything on the rig; everything is sim/unit-tested. Hardware validation is a
-separate, serialized campaign run by the coordinator with the user present.
+Coordinator: panto-d8. The tuning session (panto-12) is live in the same tree and owns
+`backends/position.py`, `config.py`, `presets.py` + `presets.json`, `limits.py`, `guard.py`,
+`step_logic.py`, `bench_logic.py`, `sysid_logic.py`, `scripts/{step_response,trace_shape,
+reset_pose,goto_pose,stiffness_bench,sysid,fit_hold_ff,experiment_log,plot_*,offset_sweep,
+point_hold}.py`, `tests/test_backends.py`, `tests/test_bench_logic.py`, `tests/test_presets*.py`,
+`experiments/` — **no stream touches those**. The sysid cogging-mode fix (bounded gains,
+torsion-trend removal) is handed to panto-12 with the rest of sysid. No stream runs anything
+on the rig; everything is sim/unit-tested. Hardware validation is a separate, serialized
+campaign run by the coordinator with the user present, coordinated with panto-12 on the bus.
 
 | stream | owns (create/edit) | milestone |
 |---|---|---|
 | A — constraint authoring UI | `ui/index.html` | 4, 5, 7 |
-| B — runtime safety | `panto/runtime.py`, `panto/limits.py`, `tests/test_runtime.py`, `tests/test_limits.py` | 5, 7, deferred TODOs |
+| B — runtime safety | `panto/runtime.py`, `tests/test_runtime.py` | 5, 7, deferred TODOs |
 | C — settings + calibration UI | `panto/web.py`, `ui/settings.html`, `ui/calibrate.html`, `tests/test_web.py` | spec "settings UI", "calibration UI" |
-| D — sysid cogging fix + A/B bench | `panto/sysid_logic.py`, `scripts/sysid.py`, `panto/ab_logic.py`, `scripts/ab_bench.py`, `tests/test_sysid_logic.py`, `tests/test_ab_logic.py` | 3, 6 |
+| D — torque-backend A/B bench | `panto/backends/torque.py`, `panto/ab_logic.py`, `scripts/ab_bench.py`, `tests/test_ab_logic.py` | 6 |
 | E — sim fidelity | `panto/sim.py`, `tests/test_sim.py` | unblocks 4–6 off-rig |
 
 Shared/foreign files: put the exact diff in your final report; the coordinator applies it.
@@ -361,20 +365,22 @@ sends `{type:"clear_errors"}`. Read `state.workspace` (below) and draw the bound
 - `/settings` and `/calibrate` serve the two pages; both are plain-JS like `index.html`.
 - Dispatch `clear_errors` → `self._rt.clear_errors()` (guard with `getattr` until B lands).
 
-### D — sysid cogging fix + A/B bench
+### D — torque-backend A/B bench
 
-- Cogging mode currently bang-bangs at ±0.8 A (unbounded `pos_gain = 40/vel_gain`). Fix:
-  bounded gains (pos_gain ≤ a `--cog-pos-gain` default 20, vel_limit = the ramp speed × 1.5),
-  reject the run if |Iq| pins at the cap > 5 % of samples. Before the spectrum, fit and
-  remove a linear `Iq(q)` trend and report it as `"torsion_a_per_rad"` (measured harness
-  spring, ~3 A/rad shoulder on 2026-09-09). `plant_model.json` keys are frozen as written by
-  `_write_plant_model` today; you may **add** `"torsion_a_per_rad"`, never rename.
 - `scripts/ab_bench.py` + `panto/ab_logic.py`: identical line + wall task on
   `--backend position` and `--backend torque`, at a stated `--pose`, metrics per backend:
   tangential-drag RMS current while sliding along the constraint at a commanded speed,
   normal stiffness from a lateral offset step (mm per N-equivalent, in amps), overshoot,
   I²t per run. Output `logs/ab_bench-<utc>/report.{json,md}`. Must run end-to-end in
-  `--sim`; hardware flags mirror `stiffness_bench.py` (cool-downs, disarm abort).
+  `--sim`; hardware flags mirror `stiffness_bench.py` (cool-downs, disarm abort — read it,
+  don't edit it). Gains come from the presets registry (`panto.presets`, read-only for D):
+  the rig's current working point is `hover-K25-pj` (K25, vel_gain 0.01 shoulder / 0.05
+  elbow, vel_limit 50 rad/s, `--hold-ff 1`); vel_gain ≥ 0.1 chatters at 41 Hz on the
+  near-frictionless shoulder — never default above 0.05.
+- `backends/torque.py` may be edited if the bench needs it (plateau/notch/cap knobs);
+  keep `TorqueBackend`'s public surface and `tests/test_backends.py` (foreign) green.
+- `plant_model.json` keys are frozen as written by `scripts/sysid.py::_write_plant_model`;
+  the bench may read it, never write it.
 
 ### E — sim fidelity (defaults must leave every existing test byte-identical)
 
