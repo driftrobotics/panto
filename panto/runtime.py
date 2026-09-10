@@ -59,6 +59,7 @@ _I2T_FLOOR = 0.05   # never scale force below this, even fully depleted
 _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajectory
 
 _VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
+_CURRENT_CAP_MAX = 2.0  # A; drive current_hard_max is 2.5, 2 A bursts accepted 2026-09-10
 
 # Sustained-oscillation guard (user decision 2026-09-10: no K clamp, guard instead).
 _OSC_GUARD_K = 25.0   # N/m: free-air-stable tip stiffness the guard falls back to
@@ -237,13 +238,22 @@ class Runtime:
 
     _TUNING_FIELDS = ("stiffness_n_per_m", "wall_stiffness_n_per_m", "force_limit_n")
 
-    def set_tuning(self, *, vel_gain=None, **fields: float) -> None:
+    def set_tuning(self, *, vel_gain=None, current_cap_a=None, **fields: float) -> None:
         """Live feel presets from the UI: any of ``stiffness_n_per_m``,
-        ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats) and
-        ``vel_gain`` = per-motor list, pushed to the drives if armed."""
+        ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats),
+        ``vel_gain`` = per-motor list (pushed to the drives if armed) and
+        ``current_cap_a`` (all motors' ``current_soft_max``; the backend re-reads
+        it every tick). K sets crispness, the cap sets strength (2026-09-10)."""
         bad = set(fields) - set(self._TUNING_FIELDS)
         if bad:
             raise ValueError(f"unknown tuning field(s): {sorted(bad)}")
+        if current_cap_a is not None:
+            cap = float(current_cap_a)
+            if not 0.0 < cap <= _CURRENT_CAP_MAX:
+                raise ValueError(f"current_cap_a must be in (0, {_CURRENT_CAP_MAX}], got {cap}")
+            with self._lock:
+                for m in self._cfg.motors:
+                    m.current_soft_max = cap
         if vel_gain is not None:
             gains = [float(v) for v in vel_gain]
             if len(gains) != len(self._cfg.motors):
@@ -282,6 +292,7 @@ class Runtime:
     def _tuning(self) -> dict:
         t = {name: float(getattr(self._cfg.control, name)) for name in self._TUNING_FIELDS}
         t["vel_gain"] = [float(m.vel_gain) for m in self._cfg.motors]
+        t["current_cap_a"] = float(max(m.current_soft_max for m in self._cfg.motors))
         return t
 
     # ------------------------------------------------------------------ record

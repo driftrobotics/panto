@@ -733,3 +733,14 @@ def test_oscillation_guard_ignores_steady_tracking_and_low_k():
         clock.t += 0.005
         rt.step(dt=0.005)
     assert cfg.control.stiffness_n_per_m == 100.0
+
+
+def test_set_tuning_current_cap_applies_to_all_motors():
+    rt, cfg, _, _, _ = make()
+    rt.set_tuning(current_cap_a=2.0)
+    assert [m.current_soft_max for m in cfg.motors] == [2.0, 2.0]
+    rt.note_heartbeat()
+    rt.step(dt=0.005)
+    assert rt.telemetry()["tuning"]["current_cap_a"] == 2.0
+    with pytest.raises(ValueError):
+        rt.set_tuning(current_cap_a=2.5)
