@@ -99,7 +99,7 @@
     <label>len <input id="trail-length" type="number" min="1" max="30" step="1" value="10"> s</label>
     <button id="trail-clear">Clear</button>
   </div>
-  <div class="hint">drag with the selected tool · drag from the tip = "hand" force (sim) · g = grid · Delete removes the selection · Rect traces a rectangle</div>
+  <div class="hint">drag with the selected tool · drag from the tip = "hand" force (sim) · g = grid · s = snap-to · Delete removes the selection · Rect traces a rectangle</div>
 </main>
 <div id="toast"></div>
 
@@ -117,6 +117,10 @@
       <label>pitch <input id="grid-pitch" type="number" min="1" step="1" value="20"> mm</label>
       <button id="clear-c">Clear all</button>
     </div>
+    <div class="row">
+      <button id="snap-toggle" aria-pressed="false">Snap-to</button>
+      <label>within <input id="snap-threshold" type="number" min="1" step="1" value="8"> mm</label>
+    </div>
     <div id="constraint-list"></div>
   </section>
 
@@ -126,6 +130,12 @@
     <div id="feel-now" class="hint">–</div>
     <div id="cap"></div>
     <div class="hint">K = crispness, cap = strength · 2 A only ≤ K100 · guard drops to K25 on a hands-off swing</div>
+    <div class="row" id="elbow">
+      <button data-elbow="up">up</button>
+      <button data-elbow="down">down</button>
+      <button data-elbow="auto">auto</button>
+    </div>
+    <div id="elbow-now" class="hint">–</div>
   </section>
 
   <section>
@@ -185,7 +195,13 @@ let selectedIndex = -1;
 let authoring = false, draft = null;              // {kind, a:[x,y], cur:[x,y]}
 let dragging = false;                             // sim "hand" drag
 let lastRect = null;                              // {size_m:[w,h], centre:[x,y]} of last traced rectangle
-let handleDrag = null;                            // {kind:'a'|'b'|'rotate'|'body', index, ...} — selected wall/line editing
+let handleDrag = null;                            // {kind:'a'|'b'|'rotate'|'body'|'point'|'origin', index, ...}
+
+// ------------------------------------------------------------------ snap-to
+const SNAP_ON_KEY = 'panto.snapOn', SNAP_MM_KEY = 'panto.snapThresholdMm';
+let snapOn = localStorage.getItem(SNAP_ON_KEY) === '1';
+let snapThresholdMm = Math.max(1, parseFloat(localStorage.getItem(SNAP_MM_KEY)) || 8);
+const snapM = () => snapThresholdMm / 1000;
 
 const m2p = (x, y) => [OX + x * PX, OY - y * PX];
 const p2m = (px, py) => [(px - OX) / PX, (OY - py) / PX];
@@ -301,8 +317,40 @@ document.querySelectorAll('#tool-palette button').forEach(b => {
 document.getElementById('tool-rect').onclick = () => setTool('rect');
 
 function sendConstraints() {
-  send({ type: 'set_constraints', constraints });
+  // snap_m is derived from snap-to state, not stored on the constraint objects
+  // themselves — point/line/grid carry it when on, walls never do.
+  const payload = constraints.map(c => {
+    const out = { ...c };
+    if (snapOn && (c.kind === 'point' || c.kind === 'line' || c.kind === 'grid')) {
+      out.snap_m = snapM();
+    } else {
+      delete out.snap_m;
+    }
+    return out;
+  });
+  send({ type: 'set_constraints', constraints: payload });
 }
+
+/* ------------------------------------------------------------------ snap-to controls */
+const snapToggleBtn = document.getElementById('snap-toggle');
+const snapThresholdInput = document.getElementById('snap-threshold');
+snapThresholdInput.value = snapThresholdMm;
+snapToggleBtn.setAttribute('aria-pressed', String(snapOn));
+snapToggleBtn.onclick = () => {
+  if (!controller) return;
+  snapOn = !snapOn;
+  localStorage.setItem(SNAP_ON_KEY, snapOn ? '1' : '0');
+  snapToggleBtn.setAttribute('aria-pressed', String(snapOn));
+  sendConstraints();
+  draw();
+};
+snapThresholdInput.onchange = () => {
+  snapThresholdMm = Math.max(1, parseFloat(snapThresholdInput.value) || 8);
+  snapThresholdInput.value = snapThresholdMm;
+  localStorage.setItem(SNAP_MM_KEY, String(snapThresholdMm));
+  if (snapOn && controller) sendConstraints();
+  draw();
+};
 
 document.getElementById('clear-c').onclick = () => {
   if (!controller) return;
@@ -535,8 +583,25 @@ function updateFeel() {
   capButtons['2 A burst'].setAttribute('aria-pressed', capA != null && Math.abs(capA - 2.0) < 1e-6);
 }
 
+/* ------------------------------------------------------------------ elbow mode */
+document.querySelectorAll('#elbow button').forEach(b => {
+  b.onclick = () => send({ type: 'set_elbow', mode: b.dataset.elbow });
+});
+
+function updateElbow() {
+  const t = state && state.tuning;
+  const mode = t ? t.elbow : undefined;
+  document.querySelectorAll('#elbow button').forEach(b => {
+    b.disabled = !controller;
+    b.setAttribute('aria-pressed', String(mode !== undefined && b.dataset.elbow === mode));
+  });
+  const now = t ? t.elbow_now : undefined;
+  document.getElementById('elbow-now').textContent = now ? `using: ${now}` : '–';
+}
+
 function updateControls() {
   updateFeel();
+  updateElbow();
   const s = state;
   const armed = !!(s && s.closed_loop);
   const recording = s ? (s.recording ?? false) : false;
@@ -560,6 +625,8 @@ function updateControls() {
   document.getElementById('tool-rect').disabled = !controller;
   document.getElementById('clear-c').disabled = !controller;
   document.getElementById('clear-err').disabled = !controller;
+  snapToggleBtn.disabled = !controller;
+  snapThresholdInput.disabled = !controller;
 }
 
 /* ------------------------------------------------------------------ pointer / hit-testing */
@@ -572,6 +639,10 @@ function perpDist(mx, my, a, d) {
   return Math.hypot(mx - px, my - py);
 }
 
+// Body hit-test across every constraint (nearest one wins). Finite wall/line
+// segments are clamped to their a..b span (plus a little slack) so you can't
+// grab a line far past its visible endpoints; infinite ones test the whole
+// line, matching how they're drawn.
 function hitTest(mx, my) {
   const thresholdM = 12 / PX;
   let best = -1, bestD = thresholdM;
@@ -579,10 +650,19 @@ function hitTest(mx, my) {
     let d = Infinity;
     if (c.kind === 'point') {
       d = Math.hypot(mx - c.at[0], my - c.at[1]);
-    } else if (c.kind === 'line') {
-      d = perpDist(mx, my, c.a, c.d);
-    } else if (c.kind === 'wall') {
-      d = perpDist(mx, my, c.a, [-c.normal[1], c.normal[0]]);
+    } else if (c.kind === 'line' || c.kind === 'wall') {
+      // perpT (perpendicular-distance direction) may come from `normal`, whose
+      // sign is arbitrary (whichever side was free at creation) — fine for
+      // perpDist, which is sign-invariant. The along-segment clamp is NOT
+      // sign-invariant, so it must use the unambiguous a->b direction instead.
+      const perpT = c.kind === 'wall' ? unit([-c.normal[1], c.normal[0]]) : unit(c.d);
+      d = perpDist(mx, my, c.a, perpT);
+      if (c.b) {
+        const segLen = Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1]);
+        const alongT = unit([c.b[0] - c.a[0], c.b[1] - c.a[1]]);
+        const along = (mx - c.a[0]) * alongT[0] + (my - c.a[1]) * alongT[1];
+        if (along < -thresholdM || along > segLen + thresholdM) d = Infinity;
+      }
     } else if (c.kind === 'grid') {
       const gx = c.origin[0] + Math.round((mx - c.origin[0]) / c.pitch) * c.pitch;
       const gy = c.origin[1] + Math.round((my - c.origin[1]) / c.pitch) * c.pitch;
@@ -609,30 +689,34 @@ function segHandlePositions(c) {
   return { a, b, mid, rot };
 }
 
-function hitTestHandle(c, mx, my) {
-  const h = segHandlePositions(c);
-  if (!h) return null;
-  const thM = 10 / PX;
-  if (Math.hypot(mx - h.a[0], my - h.a[1]) < thM) return 'a';
-  if (Math.hypot(mx - h.b[0], my - h.b[1]) < thM) return 'b';
-  if (Math.hypot(mx - h.rot[0], my - h.rot[1]) < thM) return 'rotate';
-  return null;
+// All draggable handles for one constraint, tagged with its index — used both
+// for hit-testing (nearest handle wins, across every object) and for drawing.
+// point -> a single centre handle; grid -> a single origin handle; wall/line
+// -> two endpoints + a rotate handle, but only once finite (has b).
+function handlesOf(c, i) {
+  if (c.kind === 'point') return [{ index: i, kind: 'point', pos: c.at }];
+  if (c.kind === 'grid') return [{ index: i, kind: 'origin', pos: c.origin }];
+  if ((c.kind === 'line' || c.kind === 'wall') && c.b) {
+    const h = segHandlePositions(c);
+    return [
+      { index: i, kind: 'a', pos: h.a },
+      { index: i, kind: 'b', pos: h.b },
+      { index: i, kind: 'rotate', pos: h.rot },
+    ];
+  }
+  return [];
 }
 
-// Body hit-test for the currently selected wall/line only (translate-drag).
-// Finite segments are clamped to their a..b span; infinite ones test the
-// whole line, matching how they're drawn.
-function segBodyHit(c, mx, my) {
-  if (!(c.kind === 'line' || c.kind === 'wall')) return false;
+function hitTestAllHandles(mx, my) {
   const thM = 10 / PX;
-  const t = c.kind === 'wall' ? unit([-c.normal[1], c.normal[0]]) : unit(c.d);
-  if (perpDist(mx, my, c.a, t) >= thM) return false;
-  if (c.b) {
-    const segLen = Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1]);
-    const along = (mx - c.a[0]) * t[0] + (my - c.a[1]) * t[1];
-    return along >= -thM && along <= segLen + thM;
-  }
-  return true;
+  let best = null, bestD = thM;
+  constraints.forEach((c, i) => {
+    handlesOf(c, i).forEach(h => {
+      const d = Math.hypot(mx - h.pos[0], my - h.pos[1]);
+      if (d < bestD) { bestD = d; best = h; }
+    });
+  });
+  return best;
 }
 
 function snapToGridIfHeld(mx, my, shiftKey) {
@@ -668,7 +752,12 @@ function startHandleDrag(kind, c, index, mx, my) {
   if (kind === 'a' || kind === 'b') {
     return { kind, index, startNormal: c.normal ? [...c.normal] : null };
   }
-  // body
+  if (kind === 'point') return { kind: 'point', index };
+  if (kind === 'origin') return { kind: 'origin', index };
+  // body: translate-drag. A point/grid has no endpoints to translate, so its
+  // "body" is just its single handle (centre / origin).
+  if (c.kind === 'point') return { kind: 'point', index };
+  if (c.kind === 'grid') return { kind: 'origin', index };
   return {
     kind: 'body', index, startMouse: [mx, my],
     startA: [...c.a], startB: c.b ? [...c.b] : null,
@@ -706,6 +795,11 @@ function updateHandleDrag(mx, my, shiftKey) {
     const dx = mx - hd.startMouse[0], dy = my - hd.startMouse[1];
     c.a = [hd.startA[0] + dx, hd.startA[1] + dy];
     if (hd.startB) c.b = [hd.startB[0] + dx, hd.startB[1] + dy];
+  } else if (hd.kind === 'point') {
+    const [nx, ny] = snapToGridIfHeld(mx, my, shiftKey);
+    c.at = [nx, ny];
+  } else if (hd.kind === 'origin') {
+    c.origin = [mx, my];
   }
   throttledResend();
   renderConstraintList();
@@ -720,27 +814,29 @@ cv.addEventListener('pointerdown', e => {
   }
   if (!controller) return;
 
-  // handles > body > other items: a selected wall/line's own handles/body take
-  // priority over reselecting or authoring, regardless of the active tool.
-  if (selectedIndex >= 0 && constraints[selectedIndex]) {
-    const c = constraints[selectedIndex];
-    if (c.kind === 'wall' || c.kind === 'line') {
-      const h = hitTestHandle(c, mx, my);
-      if (h) {
-        handleDrag = startHandleDrag(h, c, selectedIndex, mx, my);
-        cv.setPointerCapture(e.pointerId);
-        return;
-      }
-      if (segBodyHit(c, mx, my)) {
-        handleDrag = startHandleDrag('body', c, selectedIndex, mx, my);
-        cv.setPointerCapture(e.pointerId);
-        return;
-      }
-    }
-  }
-
+  // Select tool: handles of every object beat bodies of every object, nearest
+  // wins in each tier. Grabbing an unselected object's handle/body selects it
+  // and starts the drag in the same gesture.
   if (activeTool === 'select') {
-    selectedIndex = hitTest(mx, my);
+    const h = hitTestAllHandles(mx, my);
+    if (h) {
+      selectedIndex = h.index;
+      handleDrag = startHandleDrag(h.kind, constraints[h.index], h.index, mx, my);
+      cv.setPointerCapture(e.pointerId);
+      renderConstraintList();
+      draw();
+      return;
+    }
+    const bi = hitTest(mx, my);
+    if (bi >= 0) {
+      selectedIndex = bi;
+      handleDrag = startHandleDrag('body', constraints[bi], bi, mx, my);
+      cv.setPointerCapture(e.pointerId);
+      renderConstraintList();
+      draw();
+      return;
+    }
+    selectedIndex = -1;
     renderConstraintList();
     draw();
     return;
@@ -859,6 +955,13 @@ document.addEventListener('keydown', e => {
     renderConstraintList();
     draw();
     e.preventDefault();
+  } else if (e.key === 's' || e.key === 'S') {
+    if (!controller) return;
+    snapOn = !snapOn;
+    localStorage.setItem(SNAP_ON_KEY, snapOn ? '1' : '0');
+    snapToggleBtn.setAttribute('aria-pressed', String(snapOn));
+    sendConstraints();
+    draw();
   }
 });
 
@@ -1021,29 +1124,74 @@ function drawConstraints() {
   if (authoring && draft) drawDraft(draft);
 }
 
-// Endpoint + rotate handles, drawn only for the selected wall/line (and only
-// once it's finite — an infinite one has no b/midpoint to hang them off).
-function drawSelectedHandles() {
-  if (selectedIndex < 0) return;
-  const c = constraints[selectedIndex];
-  if (!c) return;
-  const h = segHandlePositions(c);
-  if (!h) return;
+// Handles for every constraint, drawn only while the Select tool is active:
+// endpoints + a rotate handle for every finite wall/line, a centre handle for
+// points, an origin handle for grids. The selected item's handles render at
+// full brightness; every other item's handles render dimmer, so you can see
+// (and grab) an object without selecting it first.
+function drawAllHandles() {
+  if (activeTool !== 'select') return;
+  constraints.forEach((c, i) => {
+    const selected = i === selectedIndex;
+    if ((c.kind === 'line' || c.kind === 'wall') && c.b) {
+      const h = segHandlePositions(c);
+      ctx.save();
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = selected ? 'rgba(255,204,51,0.7)' : 'rgba(255,204,51,0.3)';
+      ctx.lineWidth = 1;
+      const [mpx, mpy] = m2p(h.mid[0], h.mid[1]);
+      const [rpx, rpy] = m2p(h.rot[0], h.rot[1]);
+      ctx.beginPath(); ctx.moveTo(mpx, mpy); ctx.lineTo(rpx, rpy); ctx.stroke();
+      ctx.restore();
+    }
+    const hs = handlesOf(c, i);
+    if (!hs.length) return;
+    ctx.save();
+    ctx.fillStyle = selected ? '#ffcc33' : 'rgba(255,204,51,0.4)';
+    ctx.strokeStyle = selected ? '#00000090' : 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1.5;
+    for (const h of hs) {
+      const [px, py] = m2p(h.pos[0], h.pos[1]);
+      ctx.beginPath(); ctx.arc(px, py, selected ? 6 : 4.5, 0, TAU); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  });
+}
+
+// Faint band showing where snap-to engages: a translucent stroke of width
+// 2*snap_m (px) traced along each line, and as a round-capped dot (which
+// renders as a filled disc of the same diameter) at each point/grid
+// intersection. Walls never carry snap_m, so they never get a band.
+function drawSnapBands() {
+  if (!snapOn) return;
+  const widthPx = Math.max(1, 2 * snapM() * PX);
   ctx.save();
-  ctx.setLineDash([2, 2]);
-  ctx.strokeStyle = 'rgba(255,204,51,0.7)';
-  ctx.lineWidth = 1;
-  const [mpx, mpy] = m2p(h.mid[0], h.mid[1]);
-  const [rpx, rpy] = m2p(h.rot[0], h.rot[1]);
-  ctx.beginPath(); ctx.moveTo(mpx, mpy); ctx.lineTo(rpx, rpy); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#ffcc33';
-  ctx.strokeStyle = '#00000090';
-  ctx.lineWidth = 1.5;
-  for (const p of [h.a, h.b, h.rot]) {
-    const [px, py] = m2p(p[0], p[1]);
-    ctx.beginPath(); ctx.arc(px, py, 6, 0, TAU); ctx.fill(); ctx.stroke();
-  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = widthPx;
+  ctx.lineCap = 'round';
+  constraints.forEach(c => {
+    if (c.kind === 'point') {
+      const [px, py] = m2p(c.at[0], c.at[1]);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py); ctx.stroke();
+    } else if (c.kind === 'line') {
+      if (c.b) drawFiniteSegment(c.a, c.b);
+      else drawInfiniteLine(c.a, c.d);
+    } else if (c.kind === 'grid') {
+      const { pitch, origin } = c;
+      const iMin = Math.ceil((-REACH - origin[0]) / pitch);
+      const iMax = Math.floor((REACH - origin[0]) / pitch);
+      const jMin = Math.ceil((-REACH - origin[1]) / pitch);
+      const jMax = Math.floor((REACH - origin[1]) / pitch);
+      for (let i = iMin; i <= iMax; i++) {
+        for (let j = jMin; j <= jMax; j++) {
+          const x = origin[0] + i * pitch, y = origin[1] + j * pitch;
+          if (Math.hypot(x, y) > REACH * 1.02) continue;
+          const [px, py] = m2p(x, y);
+          ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, py); ctx.stroke();
+        }
+      }
+    }
+  });
   ctx.restore();
 }
 
@@ -1066,8 +1214,9 @@ function draw() {
   ctx.arc(OX, OY, REACH * PX, 0, TAU); ctx.stroke();
 
   drawWorkspace();
+  drawSnapBands();
   drawConstraints();
-  drawSelectedHandles();
+  drawAllHandles();
   drawLastRect();
   if (tipTrailOn) drawTrail(tipTrail, '80,100,200');
   if (anchorTrailOn) drawTrail(anchorTrail, '58,160,212');
