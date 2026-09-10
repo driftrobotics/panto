@@ -90,55 +90,7 @@ class PositionBackend(ImpedanceBackend):
         else:
             self._last_clamp_anchor = None
 
-        # Measured q within margin/2 of a configured limit while armed -- stop
-        # rendering stiffness now rather than let it reach the mechanical stop.
-        check_runtime(cmd.q, self._config.motors)
-
-        # Jᵀ K_x J is PSD for PSD K_x; its diagonal is the per-joint stiffness the
-        # scalar pos_gain can render. Off-diagonal coupling is dropped — the cost
-        # of scalar per-joint gains that the torque backend exists to avoid.
-        k_joint = self._k_joint(cmd.q, cmd.stiffness, geo)
-
-        # τ_max the drives may need to hit force_limit in the worst-conditioned
-        # direction; floored σ_min keeps it finite near singularities.
-        sigma = max(
-            min_singular_value(cmd.q, geo),
-            float(self._config.sigma_min_threshold),
-        )
-        tau_max = float(cmd.force_limit) / sigma
-
-        qd = cmd.qd
-        pos_gains = []
-        current_caps = []
-        vel_caps = []
-        tau_ffs = []
-        for i, motor in enumerate(self._config.motors):
-            pos_gain = self._pos_gain(motor, k_joint[i])
-            force_cap = self._current_cap(motor, tau_max)
-            qd_i = float(qd[i]) if qd is not None else 0.0
-            vel_cap = self._vel_scheduled_cap(motor, qd_i)
-            current_cap = min(force_cap, vel_cap)
-            tau_ff = self._coulomb_ff(motor, float(q_target[i]) - float(cmd.q[i]))
-            tau_ff += self._hold_ff(motor, cmd.q)
-            self._link.set_input_pos(motor.node_id, float(q_target[i]), torque_ff_nm=tau_ff)
-            self._link.set_pos_gain(motor.node_id, pos_gain)
-            self._link.set_limits(motor.node_id, self.vel_limit_rad_s, current_cap)
-            pos_gains.append(pos_gain)
-            current_caps.append(current_cap)
-            vel_caps.append(vel_cap)
-            tau_ffs.append(tau_ff)
-
-        self.last_command = {
-            "q_target": q_target.tolist(),
-            "k_joint_nm_rad": k_joint.tolist(),
-            "pos_gain": pos_gains,
-            "current_cap_a": current_caps,
-            "vel_scheduled_cap_a": vel_caps,
-            "tau_ff_nm": tau_ffs,
-            "sigma_min": sigma,
-            "tau_max_nm": tau_max,
-            "vel_limit_turn_s": self.vel_limit_rad_s,
-        }
+        self._render_q_target(q_target, cmd)
 
     def relax(self) -> None:
         # Park each anchor on the current joint angle at zero gain → no torque.
@@ -208,6 +160,70 @@ class PositionBackend(ImpedanceBackend):
         cap = cap_max - slope * abs(qd_rad_s)
         cap = min(cap_max, max(cap_min, cap))
         return round(cap / cls.CAP_QUANT_A) * cls.CAP_QUANT_A
+
+    def apply_joint(self, q_target, cmd: ImpedanceCommand) -> None:
+        """Joint-space target (recorded playback): same gains/caps/feedforward
+        path as ``apply()`` but the target joints are given directly -- no
+        inverse kinematics, so the IK branch cannot flip mid-take."""
+        q_target = clamp_targets(np.asarray(q_target, float), self._config.motors)
+        self._last_clamp_anchor = None
+        self._render_q_target(q_target, cmd)
+
+    def _render_q_target(self, q_target: np.ndarray, cmd: ImpedanceCommand) -> None:
+        """Post-IK half shared by ``apply()`` and ``apply_joint()``: joint-limit
+        runtime check, per-joint stiffness from cmd.stiffness at the measured
+        q, current caps, Coulomb + holding-torque feedforward, and the CAN
+        sends."""
+        geo = self._config.geo
+        # Measured q within margin/2 of a configured limit while armed -- stop
+        # rendering stiffness now rather than let it reach the mechanical stop.
+        check_runtime(cmd.q, self._config.motors)
+
+        # Jᵀ K_x J is PSD for PSD K_x; its diagonal is the per-joint stiffness the
+        # scalar pos_gain can render. Off-diagonal coupling is dropped — the cost
+        # of scalar per-joint gains that the torque backend exists to avoid.
+        k_joint = self._k_joint(cmd.q, cmd.stiffness, geo)
+
+        # τ_max the drives may need to hit force_limit in the worst-conditioned
+        # direction; floored σ_min keeps it finite near singularities.
+        sigma = max(
+            min_singular_value(cmd.q, geo),
+            float(self._config.sigma_min_threshold),
+        )
+        tau_max = float(cmd.force_limit) / sigma
+
+        qd = cmd.qd
+        pos_gains = []
+        current_caps = []
+        vel_caps = []
+        tau_ffs = []
+        for i, motor in enumerate(self._config.motors):
+            pos_gain = self._pos_gain(motor, k_joint[i])
+            force_cap = self._current_cap(motor, tau_max)
+            qd_i = float(qd[i]) if qd is not None else 0.0
+            vel_cap = self._vel_scheduled_cap(motor, qd_i)
+            current_cap = min(force_cap, vel_cap)
+            tau_ff = self._coulomb_ff(motor, float(q_target[i]) - float(cmd.q[i]))
+            tau_ff += self._hold_ff(motor, cmd.q)
+            self._link.set_input_pos(motor.node_id, float(q_target[i]), torque_ff_nm=tau_ff)
+            self._link.set_pos_gain(motor.node_id, pos_gain)
+            self._link.set_limits(motor.node_id, self.vel_limit_rad_s, current_cap)
+            pos_gains.append(pos_gain)
+            current_caps.append(current_cap)
+            vel_caps.append(vel_cap)
+            tau_ffs.append(tau_ff)
+
+        self.last_command = {
+            "q_target": q_target.tolist(),
+            "k_joint_nm_rad": k_joint.tolist(),
+            "pos_gain": pos_gains,
+            "current_cap_a": current_caps,
+            "vel_scheduled_cap_a": vel_caps,
+            "tau_ff_nm": tau_ffs,
+            "sigma_min": sigma,
+            "tau_max_nm": tau_max,
+            "vel_limit_turn_s": self.vel_limit_rad_s,
+        }
 
     @staticmethod
     def _hold_ff(motor, q_rad) -> float:

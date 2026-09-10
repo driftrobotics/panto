@@ -614,3 +614,33 @@ def test_position_hold_ff_off_by_default_and_linear_when_on():
     assert abs(PositionBackend._hold_ff(m, q) - expect) < 1e-12
     m.hold_ff_scale = 0.5
     assert abs(PositionBackend._hold_ff(m, q) - 0.5 * expect) < 1e-12
+
+
+def test_position_apply_joint_sends_given_q_without_ik_and_shares_gain_path():
+    from panto.backends.position import PositionBackend
+    from panto.kinematics import forward
+    cfg = make_config()
+    link = FakeLink(q=(0.4, -1.1))
+    be = PositionBackend(link, cfg)
+    be.enter()
+    q_t = np.array([0.5, -1.0])
+    c = cmd(anchor=forward(q_t, cfg.geo), q=(0.4, -1.1), stiffness=25.0 * np.eye(2))
+    be.apply_joint(q_t, c)
+    assert abs(link.input_pos[0] - 0.5) < 1e-12 and abs(link.input_pos[1] + 1.0) < 1e-12
+    assert link.pos_gain[0] > 0 and link.pos_gain[1] > 0
+    assert be.last_command["q_target"] == [0.5, -1.0]
+    # Cartesian apply() on the same anchor lands on the same joints (same branch)
+    be.apply(c)
+    assert np.allclose([link.input_pos[0], link.input_pos[1]], q_t, atol=1e-6)
+
+
+def test_position_apply_joint_clamps_to_joint_limits():
+    from panto.backends.position import PositionBackend
+    from panto.kinematics import forward
+    cfg = make_config(q_min_rad=-1.0, q_max_rad=1.0, limit_margin_rad=0.05)
+    link = FakeLink(q=(0.4, -0.5))
+    be = PositionBackend(link, cfg)
+    be.enter()
+    q_t = np.array([1.5, -0.5])
+    be.apply_joint(q_t, cmd(anchor=forward(q_t, cfg.geo), q=(0.4, -0.5), stiffness=25.0 * np.eye(2)))
+    assert link.input_pos[0] <= 1.0
