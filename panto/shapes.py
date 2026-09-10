@@ -56,14 +56,22 @@ def _resample_segment(a: np.ndarray, b: np.ndarray, speed: float, dt: float,
     return ts, pts
 
 
-def _box_path(size_m: float, centre_xy: np.ndarray, speed: float, dt: float,
+def _half_extents(size_m) -> tuple[float, float]:
+    """``size_m`` is a side length (square) or ``(w, h)`` (rectangle)."""
+    if np.ndim(size_m) == 0:
+        return float(size_m) / 2.0, float(size_m) / 2.0
+    w, h = (float(v) for v in size_m)
+    return w / 2.0, h / 2.0
+
+
+def _box_path(size_m, centre_xy: np.ndarray, speed: float, dt: float,
               laps: int, corner_dwell: float, start_xy: np.ndarray | None) -> np.ndarray:
-    half = size_m / 2.0
+    hw, hh = _half_extents(size_m)
     corners = np.array([
-        [half, -half],
-        [half, half],
-        [-half, half],
-        [-half, -half],
+        [hw, -hh],
+        [hw, hh],
+        [-hw, hh],
+        [-hw, -hh],
     ]) + centre_xy
 
     start_idx = _nearest_index(corners, start_xy) if start_xy is not None else 0
@@ -173,7 +181,8 @@ def path_length_m(shape: str, size_m: float, laps: int = 1) -> float:
     """Total path length (metres) for one or more laps -- used by tests and
     by the CLI to sanity-print expected duration."""
     if shape == "box":
-        return 4.0 * size_m * laps
+        hw, hh = _half_extents(size_m)
+        return 4.0 * (hw + hh) * laps
     if shape == "circle":
         return np.pi * size_m * laps
     if shape == "line":

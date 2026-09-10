@@ -54,6 +54,12 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / n if n > _EPS else np.zeros(2)
 
 
+def _clamp_along(t: float, a: np.ndarray, b: np.ndarray, d: np.ndarray) -> float:
+    """Clamp a parameter along unit ``d`` from ``a`` to the segment a..b."""
+    lo, hi = sorted((0.0, float((b - a) @ d)))
+    return min(max(t, lo), hi)
+
+
 def is_active(projection: Projection) -> bool:
     """The unilateral gate, factored out: a bilateral term always contributes,
     a unilateral one only once the EE is past the surface. The runtime still
@@ -88,12 +94,15 @@ class Line:
 
     a: np.ndarray
     d: np.ndarray
+    b: Optional[np.ndarray] = None   # second endpoint -> finite segment a..b
 
     def project(self, pose: np.ndarray) -> Projection:
         pose = np.asarray(pose, dtype=float)
         a = np.asarray(self.a, dtype=float)
         d = _unit(np.asarray(self.d, dtype=float))
         t = float((pose - a) @ d)
+        if self.b is not None:
+            t = _clamp_along(t, a, np.asarray(self.b, dtype=float), d)
         anchor = a + t * d
         delta = anchor - pose               # perpendicular, pose -> line
         return Projection(
@@ -128,6 +137,7 @@ class Wall:
 
     a: np.ndarray          # a point on the wall
     normal: np.ndarray     # unit, points toward the *free* side
+    b: Optional[np.ndarray] = None   # second endpoint -> finite wall a..b
 
     def project(self, pose: np.ndarray) -> Projection:
         pose = np.asarray(pose, dtype=float)
@@ -135,6 +145,13 @@ class Wall:
         n = _unit(np.asarray(self.normal, dtype=float))
         signed = float((pose - a) @ n)      # >0 on the free side
         penetration = -signed               # >0 once past the surface
+        if self.b is not None and penetration > 0.0:
+            # Finite wall: past the ends there is no surface to push against.
+            b = np.asarray(self.b, dtype=float)
+            tangent = _unit(b - a)
+            along = float((pose - a) @ tangent)
+            if along < 0.0 or along > float(np.linalg.norm(b - a)):
+                penetration = 0.0
         # Reproject onto the surface, but only ever pull along +n (out). On the
         # free side the clamp collapses the anchor onto the pose: no suck-in.
         anchor = pose + max(penetration, 0.0) * n

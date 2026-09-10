@@ -57,6 +57,8 @@ _I2T_FLOOR = 0.05   # never scale force below this, even fully depleted
 
 _LEAD_IN_S = 2.0    # ramp from the current pose before any played-back trajectory
 
+_VEL_GAIN_MAX = 0.05  # shoulder chatters at 41 Hz from 0.1 (2026-09-09); never push more
+
 
 def _scan_workspace_radii(geo, elbow: str, threshold: float, *, samples: int = 512):
     """Once-at-init radius scan for the reachable, well-conditioned annulus
@@ -227,21 +229,50 @@ class Runtime:
 
     _TUNING_FIELDS = ("stiffness_n_per_m", "wall_stiffness_n_per_m", "force_limit_n")
 
-    def set_tuning(self, **fields: float) -> None:
+    def set_tuning(self, *, vel_gain=None, **fields: float) -> None:
         """Live feel presets from the UI: any of ``stiffness_n_per_m``,
-        ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats)."""
+        ``wall_stiffness_n_per_m``, ``force_limit_n`` (positive floats) and
+        ``vel_gain`` = per-motor list, pushed to the drives if armed."""
         bad = set(fields) - set(self._TUNING_FIELDS)
         if bad:
             raise ValueError(f"unknown tuning field(s): {sorted(bad)}")
+        if vel_gain is not None:
+            gains = [float(v) for v in vel_gain]
+            if len(gains) != len(self._cfg.motors):
+                raise ValueError(f"vel_gain needs {len(self._cfg.motors)} values")
+            for v in gains:
+                if not 0.0 < v <= _VEL_GAIN_MAX:
+                    raise ValueError(f"vel_gain must be in (0, {_VEL_GAIN_MAX}], got {v}")
         with self._lock:
             for name, value in fields.items():
                 v = float(value)
                 if not v > 0.0:
                     raise ValueError(f"{name} must be > 0, got {value!r}")
                 setattr(self._cfg.control, name, v)
+            if vel_gain is not None:
+                for m, v in zip(self._cfg.motors, gains):
+                    m.vel_gain = v
+                armed = self._closed_loop
+        if vel_gain is not None and armed:
+            self._push_vel_gains()
+
+    def _push_vel_gains(self) -> None:
+        """Config is the source of truth for vel_gain: the position backend
+        derives pos_gain from it, so the drives must hold the same value."""
+        fn = getattr(self._link, "set_vel_gains", None)
+        if not callable(fn):
+            return
+        for m in self._cfg.motors:
+            v = float(m.vel_gain)
+            if v > _VEL_GAIN_MAX:
+                log.warning("motor %d vel_gain %.4f clamped to %.3f", m.node_id, v, _VEL_GAIN_MAX)
+                v = _VEL_GAIN_MAX
+            fn(m.node_id, v, float(getattr(m, "vel_integrator_gain", 0.0)))
 
     def _tuning(self) -> dict:
-        return {name: float(getattr(self._cfg.control, name)) for name in self._TUNING_FIELDS}
+        t = {name: float(getattr(self._cfg.control, name)) for name in self._TUNING_FIELDS}
+        t["vel_gain"] = [float(m.vel_gain) for m in self._cfg.motors]
+        return t
 
     # ------------------------------------------------------------------ record
 
@@ -358,9 +389,10 @@ class Runtime:
             raise RuntimeError("tripped: over_torque")
         if self._loop_error:
             raise RuntimeError(f"clear errors first: {self._loop_error}")
-        # Same order as the bring-up scripts: limits + controller mode, park the
-        # anchor on the current angle at zero gain, *then* commutate -- entering
-        # closed loop against a stale input_pos lunges toward it.
+        # Same order as the bring-up scripts: gains, limits + controller mode,
+        # park the anchor on the current angle at zero gain, *then* commutate --
+        # entering closed loop against a stale input_pos lunges toward it.
+        self._push_vel_gains()
         enter = getattr(self._backend, "enter", None)
         if callable(enter):
             enter()

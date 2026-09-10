@@ -111,3 +111,12 @@ def test_unknown_shape_raises():
 def test_bad_speed_raises():
     with pytest.raises(ValueError):
         path_points("box", 0.025, (0.0, 0.15), speed=0.0, dt=0.004)
+
+
+def test_box_accepts_rectangle_extents():
+    path = path_points("box", (0.04, 0.02), (0.0, 0.0), speed=0.01, dt=0.01)
+    xy = path[:, 1:]
+    assert xy[:, 0].max() == pytest.approx(0.02) and xy[:, 0].min() == pytest.approx(-0.02)
+    assert xy[:, 1].max() == pytest.approx(0.01) and xy[:, 1].min() == pytest.approx(-0.01)
+    assert path_length_m("box", (0.04, 0.02)) == pytest.approx(0.12)
+    assert path_length_m("box", 0.03) == pytest.approx(0.12)

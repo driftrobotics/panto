@@ -671,3 +671,29 @@ def test_tick_listener_called_with_telemetry_and_exception_swallowed():
     assert len(seen) == 1
     assert seen[0]["type"] == "state"
     assert seen[0] == rt.telemetry()
+
+
+def test_engage_pushes_config_vel_gains_clamped():
+    pushed: list[tuple] = []
+
+    class GainLink(FakeLink):
+        def set_vel_gains(self, node_id, vel_gain, vel_integrator_gain=0.0):
+            pushed.append((node_id, vel_gain, vel_integrator_gain))
+
+    cfg = Config.load()
+    cfg.motors[0].vel_gain = 0.01
+    cfg.motors[1].vel_gain = 0.3                      # above the shoulder-chatter ceiling
+    rt = Runtime(cfg, GainLink(), FakeBackend())
+    rt.engage()
+    assert pushed == [(0, 0.01, 0.0), (1, 0.05, 0.0)]
+
+    pushed.clear()
+    rt.set_tuning(vel_gain=[0.02, 0.03])
+    assert pushed == [(0, 0.02, 0.0), (1, 0.03, 0.0)]  # live push while armed
+    rt.note_heartbeat()
+    rt.step(dt=0.005)
+    assert rt.telemetry()["tuning"]["vel_gain"] == [0.02, 0.03]
+    with pytest.raises(ValueError):
+        rt.set_tuning(vel_gain=[0.1, 0.03])
+    with pytest.raises(ValueError):
+        rt.set_tuning(vel_gain=[0.01])

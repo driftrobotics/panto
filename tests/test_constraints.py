@@ -278,3 +278,28 @@ def test_is_active_gates_only_unilateral_terms():
     assert is_active(bilateral)
     assert not is_active(free_wall)
     assert is_active(stiff_wall)
+
+
+# ------------------------------------------------------------ finite segments
+
+def test_finite_wall_does_not_push_past_its_ends():
+    wall = Wall(a=np.array([0.0, 0.0]), normal=np.array([0.0, 1.0]), b=np.array([0.1, 0.0]))
+    inside = wall.project(np.array([0.05, -0.01]))
+    assert inside.penetration == pytest.approx(0.01)
+    assert np.allclose(inside.anchor, [0.05, 0.0])
+    beyond = wall.project(np.array([0.15, -0.01]))
+    assert beyond.penetration == 0.0 and not is_active(beyond)
+    before = wall.project(np.array([-0.02, -0.01]))
+    assert before.penetration == 0.0
+    free = wall.project(np.array([0.05, 0.01]))
+    assert free.penetration < 0.0 and not is_active(free)
+
+
+def test_finite_line_clamps_to_its_endpoints():
+    seg = Line(a=np.array([0.0, 0.0]), d=np.array([1.0, 0.0]), b=np.array([0.1, 0.0]))
+    assert np.allclose(seg.project(np.array([0.05, 0.02])).anchor, [0.05, 0.0])
+    assert np.allclose(seg.project(np.array([0.30, 0.02])).anchor, [0.10, 0.0])
+    assert np.allclose(seg.project(np.array([-0.30, 0.02])).anchor, [0.0, 0.0])
+    # direction pointing away from b still clamps to the same segment
+    seg2 = Line(a=np.array([0.0, 0.0]), d=np.array([-1.0, 0.0]), b=np.array([0.1, 0.0]))
+    assert np.allclose(seg2.project(np.array([0.30, 0.02])).anchor, [0.10, 0.0])

@@ -246,7 +246,7 @@ class WebServer:
                 ws,
                 self._rt.trace_shape,
                 msg["shape"],
-                float(msg["size_m"]),
+                _size(msg["size_m"]),
                 msg["centre"],
                 float(msg["speed"]),
                 laps=int(msg.get("laps", 1)),
@@ -451,6 +451,15 @@ class WebServer:
                     self._clients.discard(ws)
 
 
+def _size(v):
+    """trace_shape size: a scalar, or [w, h] for a rectangle."""
+    return tuple(float(x) for x in v) if isinstance(v, (list, tuple)) else float(v)
+
+
+def _opt_xy(v):
+    return None if v is None else np.asarray(v, float)
+
+
 def _decode_constraints(items: list) -> list:
     """UI JSON constraint list -> constraint objects.
 
@@ -463,11 +472,11 @@ def _decode_constraints(items: list) -> list:
         if kind == "point":
             out.append(_c.Point(at=np.asarray(it["at"], float)))
         elif kind == "line":
-            out.append(_c.Line(a=np.asarray(it["a"], float), d=np.asarray(it["d"], float)))
+            out.append(_c.Line(a=np.asarray(it["a"], float), d=np.asarray(it["d"], float),
+                               b=_opt_xy(it.get("b"))))
         elif kind == "wall":
-            out.append(
-                _c.Wall(a=np.asarray(it["a"], float), normal=np.asarray(it["normal"], float))
-            )
+            out.append(_c.Wall(a=np.asarray(it["a"], float),
+                               normal=np.asarray(it["normal"], float), b=_opt_xy(it.get("b"))))
         elif kind == "grid":
             out.append(
                 _c.SnapGrid(pitch=float(it["pitch"]), origin=np.asarray(it["origin"], float))
