@@ -758,11 +758,12 @@ class Runtime:
         K = np.zeros((2, 2))
         pull = np.zeros(2)
         active = False
-        # Points are "hold here" targets: only the most recently added one acts
-        # (averaging several into a centroid is not what anyone means by it).
-        last_point = next((c for c in reversed(constraints) if isinstance(c, _c.Point)), None)
+        # Only one point ever acts (averaging several into a centroid is not what
+        # anyone means): with snap radii, the nearest point within its radius;
+        # otherwise ("hold here") the most recently added one.
+        the_point = self._pick_point(constraints, pose)
         for c in constraints:
-            if isinstance(c, _c.Point) and c is not last_point:
+            if isinstance(c, _c.Point) and c is not the_point:
                 continue
             proj = c.project(pose)
             if isinstance(c, _c.Wall):
@@ -781,6 +782,21 @@ class Runtime:
             pull += K_i @ np.asarray(proj.anchor, dtype=float)
             active = True
         return K, pull, active
+
+    @staticmethod
+    def _pick_point(constraints: Sequence, pose: np.ndarray):
+        points = [c for c in constraints if isinstance(c, _c.Point)]
+        if not points:
+            return None
+        snapping = [c for c in points if c.snap_m is not None]
+        if not snapping:
+            return points[-1]
+        best, best_d = None, np.inf
+        for c in snapping:
+            d = float(np.linalg.norm(np.asarray(c.at, float) - pose))
+            if d <= float(c.snap_m) and d < best_d:
+                best, best_d = c, d
+        return best
 
     # ------------------------------------------------------------------ walls
 

@@ -881,3 +881,20 @@ def test_wall_drawn_onto_the_tip_is_inert_until_crossed_properly():
     rt.step(dt=0.005)
     rt.step(dt=0.005)
     assert not backend.applied and backend.relaxed >= 2
+
+
+def test_snap_to_points_uses_the_nearest_point_within_radius():
+    from panto.constraints import Point
+
+    rt, cfg, link, backend, _ = make()
+    rt.engage()
+    rt.set_mode(Mode.INTERACTIVE)
+    pose = forward(GOOD_Q, cfg.geo)
+    far = Point(at=pose + np.array([0.05, 0.0]), snap_m=0.008)
+    near = Point(at=pose + np.array([0.004, 0.0]), snap_m=0.008)
+    rt.set_constraints([near, far])                      # 'near' is NOT the most recent
+    rt.step(dt=0.005)
+    assert np.allclose(backend.applied[-1].anchor, near.at)
+    rt.set_constraints([far])                            # only an out-of-range point: free
+    rt.step(dt=0.005)
+    assert np.allclose(backend.applied[-1].anchor, near.at) and backend.relaxed >= 1
