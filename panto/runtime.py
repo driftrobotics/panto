@@ -582,6 +582,11 @@ class Runtime:
         q, q_dot = (np.asarray(a, dtype=float) for a in self._link.joint_state())
         age = float(self._link.feedback_age_s())
         currents = np.asarray(self._link.motor_currents(), dtype=float)
+        if not self._closed_loop:
+            # Get_Iq freezes at its last closed-loop value while an axis is IDLE
+            # (2026-09-04): no current flows, so don't let a stale reading feed
+            # I²t or the UI.
+            currents = np.zeros_like(currents)
 
         # 2. FK + latency compensation (cap the extrapolation horizon)
         geo = self._cfg.geo

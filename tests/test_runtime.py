@@ -898,3 +898,17 @@ def test_snap_to_points_uses_the_nearest_point_within_radius():
     rt.set_constraints([far])                            # only an out-of-range point: free
     rt.step(dt=0.005)
     assert np.allclose(backend.applied[-1].anchor, near.at) and backend.relaxed >= 1
+
+
+def test_i2t_ignores_the_frozen_iq_reading_while_unarmed():
+    # Get_Iq re-broadcasts its last closed-loop value while IDLE; a stale 2 A
+    # must not fill the budget while the arm is passive.
+    rt, cfg, link, _, _ = make(currents=(2.0, 2.0))
+    for _ in range(200):
+        rt.step(dt=0.05)                          # 10 s passive at a "2 A" reading
+    tel = rt.telemetry()
+    assert tel["i2t_frac"] == [0.0, 0.0] and tel["currents"] == [0.0, 0.0]
+    assert tel["tripped"] is False
+    rt.engage()
+    rt.step(dt=0.05)
+    assert rt.telemetry()["currents"] == [2.0, 2.0]   # armed: real reading again
