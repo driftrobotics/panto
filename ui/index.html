@@ -69,7 +69,7 @@
   .hint { color:var(--muted); font-size:11px; margin:0 0 6px; }
   #status { font-size:12px; color:var(--muted); margin-left:auto; }
   #status::before { content:"● "; }
-  #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); }
+  #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); } #status.warn::before { color:var(--warn); }
   label { display:block; font-size:13px; color:var(--muted); margin:0 0 8px; }
   input[type="number"], select {
     display:inline-block; padding:5px 8px; margin-left:6px; background:var(--bg); color:var(--text);
@@ -100,6 +100,7 @@
   <div class="bar" id="topbar">
     <div id="modes"></div>
     <button id="engage-toggle" disabled>Engage</button>
+    <button id="take-control" style="display:none" title="another client holds the controller role; buttons are disabled until you take it">Take control</button>
     <div id="status" class="dead">connecting…</div>
   </div>
   <canvas id="view" width="640" height="640"></canvas>
@@ -295,9 +296,18 @@ function connect() {
     else if (m.type === 'role') { controller = m.controller; renderModes(); updateControls(); }
     else if (m.type === 'state') { state = m; updateTrails(m); draw(); panel(m); }
     else if (m.type === 'error') { showToast(m.message); }
+    if (m.type === 'hello' || m.type === 'role') updateRole();
   };
 }
 const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+const takeControlBtn = document.getElementById('take-control');
+takeControlBtn.onclick = () => send({ type: 'take_control' });
+function updateRole() {
+  if (!ws || ws.readyState !== 1) return;
+  takeControlBtn.style.display = controller ? 'none' : '';
+  statusEl.textContent = controller ? 'connected · controller' : 'connected · spectator (buttons disabled)';
+  statusEl.className = controller ? 'live' : 'warn';
+}
 setInterval(() => send({ type: 'heartbeat' }), 1000);
 
 /* ------------------------------------------------------------------ toast */
