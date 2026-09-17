@@ -133,6 +133,9 @@ class _StopFlag:
         self.reason: str | None = None
         signal.signal(signal.SIGINT, lambda *_: self.set("operator:SIGINT"))
         signal.signal(signal.SIGTERM, lambda *_: self.set("operator:SIGTERM"))
+
+    def watch_stdin(self) -> None:
+        """Enter = e-stop from here on (started after the engage prompt)."""
         if sys.stdin is not None and sys.stdin.isatty():
             threading.Thread(target=self._watch_stdin, daemon=True).start()
 
@@ -169,6 +172,7 @@ class _Follower:
         kp = np.asarray(getattr(self.robot, "_kp", np.zeros(self.n)), float).copy()
         kd = np.asarray(getattr(self.robot, "_kd", np.zeros(self.n)), float).copy()
         kp[:2], kd[:2] = args.yam_kp, args.yam_kd
+        kp[6:], kd[6:] = 0.0, 0.0   # gripper stays limp: never drive it toward a hold value
         self._kp, self._kd = kp, kd
         info = self.robot.get_robot_info() if hasattr(self.robot, "get_robot_info") else {}
         self.joint_limits = np.asarray(info.get("joint_limits"), float) if info.get("joint_limits") is not None \
@@ -210,6 +214,7 @@ class _Follower:
 def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
     log = RunLogger("teleop_yam_observe", yam_channel=args.yam_channel, arm=args.arm, gripper=args.gripper)
     follower = _Follower(args)
+    stop.watch_stdin()
     lo, hi = np.full(follower.n, np.inf), np.full(follower.n, -np.inf)
     ext: list[np.ndarray] = []
     try:
@@ -319,6 +324,13 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             raise EStop("refusing to arm panto: " + "; ".join(problems))
 
         follower = _Follower(args)
+        if not args.sim and sys.stdin is not None and sys.stdin.isatty():
+            follower.idle()
+            input(">>> YAM is floating in gravity-comp idle. Hand-place it at the pose that should "
+                  "correspond to panto's current pose (mid-box), hold panto, then press Enter to ENGAGE: ")
+            follower.hold = np.asarray(follower.robot.get_joint_pos(), float).copy()
+            q_p0, _ = link.joint_state()
+        stop.watch_stdin()
         q_y, _, _, _ = follower.read()
         q_y0 = q_y[:2].copy()
         if args.yam_box_deg:
