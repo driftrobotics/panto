@@ -10,8 +10,8 @@ Three modes:
 2. **plotter** — play back a recorded or drawn trajectory
 3. **interactive** — haptics: snap-to, virtual walls, force feedback
 
-Spec (source of truth, with resolved-decision log):
-<REDACTED-PRIVATE-NOTION-LINK>
+Spec (source of truth, with resolved-decision log): kept in a private internal
+doc, not included in this repo.
 
 Start here if you're picking up the build: [`HANDOFF.md`](HANDOFF.md).
 

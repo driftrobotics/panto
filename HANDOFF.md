@@ -5,11 +5,10 @@ stubs that encode the architecture decisions, no working control loop yet.
 
 ## Context
 
-- **Spec (source of truth):**
-  <REDACTED-PRIVATE-NOTION-LINK> —
-  read the "Resolved decisions", "Architecture implications", "Revised
-  milestones", and "Deferred / TODO" sections. The material above those is the
-  original brainstorm; the decision log supersedes it.
+- **Spec (source of truth):** kept in a private internal doc, not included in
+  this repo — read the "Resolved decisions", "Architecture implications",
+  "Revised milestones", and "Deferred / TODO" sections. The material above
+  those is the original brainstorm; the decision log supersedes it.
 - **FK / IK / Jacobian:** the Notion page **"q(DD) monster math"** in the same
   workspace has the worked math for this specific linkage. `panto/kinematics.py`
   has a standard textbook serial-2R implementation — **reconcile its sign

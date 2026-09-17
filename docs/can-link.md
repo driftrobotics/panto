@@ -3,8 +3,8 @@
 The two ODrive Micros (node 0 shoulder, node 1 elbow) hang off the **ODrive
 USB-CAN adapter** (gs_usb / candleLight family, USB id `1d50:606f`, serial
 `AAAAAAAAAAAAAAAAAAAAAAAA`). A second, identical-looking adapter (serial
-`BBBBBBBBBBBBBBBB`, "CANable 2.5") belongs to the sibling_project rig and is named
-`can_yam` — do not use it for panto.
+`BBBBBBBBBBBBBBBB`, "CANable 2.5") belongs to a sibling project's rig and is
+named `can_yam` — do not use it for panto.
 
 Naming and bring-up are fully automatic via systemd-networkd:
 
