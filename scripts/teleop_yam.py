@@ -84,7 +84,9 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--wiggle-hz", type=float, default=0.2)
     p.add_argument("--no-reflect", action="store_true", help="position-position coupling only")
     p.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until e-stop")
-    p.add_argument("--rate", type=float, default=200.0, help="loop Hz")
+    p.add_argument("--rate", type=float, default=250.0,
+                   help="loop + log Hz. 250 = i2rt's own motor-chain rate (CONTROL_FREQ), the fastest new YAM\n"
+                        "data arrives; every tick is logged with both robots' feedback stamps")
     p.add_argument("--config", help="panto live-override config json")
     p.add_argument("--interface")
     p.add_argument("--channel")
@@ -97,16 +99,22 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--gripper", default="linear_4310")
     p.add_argument("--gripper-limits", type=_pair, default=None,
                    help="'closed,open' motor rad: skips i2rt's startup gripper calibration")
-    p.add_argument("--scale", type=_pair, default=np.array([1.0, 1.0]),
-                   help="YAM rad per panto rad, signed: 's' or 's1,s2'")
-    p.add_argument("--yam-range-deg", type=_pair, default=np.array([20.0, 15.0]),
+    p.add_argument("--scale", type=_pair, default=np.array([-1.0, 1.0]),
+                   help="YAM rad per panto rad, signed (rig 2026-09-17: shoulder reversed): 's' or 's1,s2'")
+    p.add_argument("--yam-range-deg", type=_pair, default=np.array([45.0, 45.0]),
                    help="J1,J2 box half-width around the engage pose (ignored with --yam-box)")
+    p.add_argument("--yam-abs-box-deg", type=str, default="10,150,10,135",
+                   help="always-on absolute box 'lo1,hi1,lo2,hi2' deg, inside the 2026-09-17 hand sweep\n"
+                        "(joint2 0..174, joint3 0..145); the range/box above is intersected with it")
+    p.add_argument("--no-box", action="store_true",
+                   help="drop the range/abs software boxes; only i2rt's joint limits (less a 0.2 rad margin:\n"
+                        "i2rt KILLS its control thread on a limit violation and the arm goes limp) remain")
     p.add_argument("--yam-box-deg", type=str, default=None,
                    help="absolute J1/J2 box 'lo1,hi1,lo2,hi2' deg (e.g. from --observe)")
     p.add_argument("--yam-kp", type=_pair, default=np.array([80.0, 80.0]),
                    help="J1,J2 MIT kp (i2rt default 80; softer does not break J2 stiction)")
     p.add_argument("--yam-kd", type=_pair, default=np.array([5.0, 5.0]))
-    p.add_argument("--yam-rate-deg-s", type=float, default=60.0, help="follower target slew limit")
+    p.add_argument("--yam-rate-deg-s", type=float, default=120.0, help="follower target slew limit")
     # leader
     p.add_argument("--couple-k", type=float, default=0.3, help="leader coupling spring, N.m/rad")
     p.add_argument("--current", type=float, default=0.8, help="panto per-axis current cap, A")
@@ -127,8 +135,10 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--sim-tau", type=_pair, default=None, help="--sim only: fake YAM external torque, N.m")
     # faults
     p.add_argument("--max-err-deg", type=float, default=20.0)
-    p.add_argument("--max-vel-deg-s", type=float, default=115.0)
-    p.add_argument("--max-eff-nm", type=float, default=8.0)
+    p.add_argument("--max-vel-deg-s", type=float, default=200.0)
+    p.add_argument("--max-eff-nm", type=float, default=16.0,
+                   help="|tau_ext| fault. kp 80 x 8 deg of ordinary dynamic lag is already 11 N.m (8 N.m\n"
+                        "false-tripped 2026-09-17); DM4340 peak is 27 N.m")
     return p.parse_args()
 
 
@@ -211,6 +221,7 @@ class _Follower:
         ff = self.robot.get_motor_torques()
         tau_ext = eff - (np.asarray(ff, float) if ff is not None else 0.0)
         stamp = getattr(getattr(self.robot, "_joint_state", None), "timestamp", None)
+        self.stamp = stamp
         age = max(0.0, time.time() - float(stamp)) if stamp else 0.0
         return q, qd, tau_ext, age
 
@@ -455,11 +466,22 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         else:
             half = np.radians(args.yam_range_deg)
             box_lo, box_hi = q_y0 - half, q_y0 + half
+        if args.no_box:
+            box_lo, box_hi = np.full(2, -np.inf), np.full(2, np.inf)
+        else:
+            ab = np.radians([float(x) for x in args.yam_abs_box_deg.split(",")])
+            box_lo, box_hi = np.maximum(box_lo, ab[[0, 2]]), np.minimum(box_hi, ab[[1, 3]])
         if follower.joint_limits is not None:
-            box_lo = np.maximum(box_lo, follower.joint_limits[follower.idx, 0])
-            box_hi = np.minimum(box_hi, follower.joint_limits[follower.idx, 1])
-        jmap = JointMap(scale=args.scale, leader_zero=q_p0, follower_zero=q_y0,
-                        follower_lo=box_lo, follower_hi=box_hi)
+            box_lo = np.maximum(box_lo, follower.joint_limits[follower.idx, 0] + 0.2)
+            box_hi = np.minimum(box_hi, follower.joint_limits[follower.idx, 1] - 0.2)
+        elif args.no_box:
+            raise EStop("--no-box needs i2rt joint limits and none were reported")
+        try:
+            jmap = JointMap(scale=args.scale, leader_zero=q_p0, follower_zero=q_y0,
+                            follower_lo=box_lo, follower_hi=box_hi)
+        except ValueError as exc:
+            raise EStop(f"refusing to engage: {exc} (yam {np.round(np.degrees(q_y0), 1).tolist()} deg, box "
+                        f"{np.round(np.degrees([box_lo, box_hi]), 1).tolist()})")
         limiter = RateLimiter(np.radians(args.yam_rate_deg_s), q_y0)
         reflector = EffortReflector(args.alpha, args.scale, cutoff_hz=args.cutoff_hz,
                                     deadband_nm=args.deadband_nm, tau_max_nm=tau_max)
@@ -555,7 +577,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
-                       yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
+                       yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
+                       panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
 
