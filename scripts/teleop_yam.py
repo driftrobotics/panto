@@ -583,10 +583,14 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_p0, _ = link.joint_state()
         stop.watch_stdin()
         if args.web:
-            from panto.teleop_web import TeleopWeb
-            web = TeleopWeb(port=args.web)
-            web.start()
-            log.event(f"teleop key page: {web.url}")
+            try:
+                from panto.teleop_web import TeleopWeb
+                web = TeleopWeb(port=args.web)
+                web.start()
+                log.event(f"teleop key page: {web.url}")
+            except Exception as exc:  # noqa: BLE001 -- the page is a convenience, never a reason not to run
+                web = None
+                log.event(f"/teleop page unavailable ({exc!r}); terminal keys only", level="WARN")
         q_y, _, _, _ = follower.read()
         q_y0 = q_y[follower.idx].copy()
         if args.yam_box_deg:
