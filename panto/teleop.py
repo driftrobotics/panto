@@ -108,7 +108,9 @@ class BuzzDetector:
     its last turning point; ``flips`` of them within ``window_s`` trips, i.e.
     a sustained >= flips/(2*window) Hz oscillation of real amplitude."""
 
-    def __init__(self, window_s: float = 0.5, flips: int = 6, min_swing_rad: float = np.radians(0.75)) -> None:
+    def __init__(self, window_s: float = 0.5, flips: int = 6, min_swing_rad: float = np.radians(2.0)) -> None:
+        # 2 deg: a ~1 deg contact-release chatter at the cap (2026-09-17 23:24) is a feel issue,
+        # not a fault; the user accepts non-buzzy oscillation (feel ladder), guard the violent case
         self._window, self._flips, self._swing = float(window_s), int(flips), float(min_swing_rad)
         self._extreme: np.ndarray | None = None
         self._dir = np.zeros(2)
