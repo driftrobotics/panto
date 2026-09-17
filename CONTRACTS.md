@@ -411,3 +411,36 @@ sends `{type:"clear_errors"}`. Read `state.workspace` (below) and draw the bound
 (`inertia_a_s2_per_rad`, `viscous_a_per_rad_s`, `friction_kinetic_intercept_a`, `delay_s`,
 optional `torsion_a_per_rad`). `--sim` stays independent-rotor by default; expose
 `--sim-plant <path>` in the report as a `__main__.py` diff, not by editing it.
+
+## Teleop web keys (`/teleop`) — 2026-09-17
+
+Owner of `panto/teleop_web.py`, `ui/teleop.html`, `tests/test_teleop_web.py`: subagent.
+Owner of `scripts/teleop_yam.py` (integration): coordinator. Do not edit each other's files.
+
+`panto/teleop_web.py` exposes:
+
+```python
+class TeleopWeb:
+    def __init__(self, *, host: str = "0.0.0.0", port: int = 8081) -> None: ...
+    def start(self) -> None      # aiohttp server on a daemon thread with its own asyncio loop; returns once listening
+    def stop(self) -> None       # idempotent
+    # Polled from the 250 Hz control thread -- must be lock-cheap and never block:
+    def held(self, key: str) -> bool          # key in {"space", "left", "right"}; True while a browser holds it
+    def jog(self) -> float                    # +1 right, -1 left, 0 neither/both
+    def stop_reason(self) -> str | None       # "web:estop" once the E-STOP button or Esc was pressed (latched)
+    def publish(self, state: dict) -> None    # called every tick; broadcast to clients at <= 30 Hz as JSON {"type":"state", ...state}
+    @property
+    def url(self) -> str
+```
+
+Routes: `GET /teleop` -> `ui/teleop.html`; `GET /ws` websocket. Client -> server JSON:
+`{"type":"key","key":"space"|"left"|"right","down":true|false}` and `{"type":"estop"}`.
+All keys are released when a client disconnects or sends `{"type":"blur"}`. Keys are
+per-connection and OR-ed across clients. Server -> client: the `state` broadcast above, plus
+`{"type":"hello","keys":[...]}` on connect.
+
+`ui/teleop.html` (vanilla JS, same look as `ui/index.html`): captures keydown/keyup for
+Space, A/D, ArrowLeft/ArrowRight (preventDefault; ignore auto-repeat via `event.repeat`),
+releases everything on `blur`/`visibilitychange`, has a large red E-STOP button (also Esc),
+and renders the `state` fields as a compact table: whatever keys arrive (values may be
+numbers, lists of numbers, strings, bools). Show connection status.
