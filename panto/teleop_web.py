@@ -74,6 +74,7 @@ class TeleopWeb:
             fut.result(timeout=5.0)
         except Exception:  # noqa: BLE001 - best-effort shutdown
             log.exception("TeleopWeb.stop failed")
+        loop.call_soon_threadsafe(loop.stop)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
         self._loop = None
@@ -116,7 +117,8 @@ class TeleopWeb:
                 pass
         if self._runner is not None:
             await self._runner.cleanup()
-        self._loop.stop()
+        # loop.stop() is scheduled from stop() *after* this future resolves -- stopping the
+        # loop in here would strand the caller's fut.result() (it timed out at 5 s).
 
     @property
     def url(self) -> str:
