@@ -22,7 +22,9 @@ i2rt runs its gripper limit calibration at startup (the gripper opens/closes)
 unless --gripper-limits is given.
 
 E-stop (every path ends in the same ``_safe_stop``): Ctrl-C / SIGTERM, Enter / q / Esc
-(terminal is in cbreak mode once engaged; SPACE held = gripper close, A/D or Left/Right held = base-yaw jog at --jog-deg-s), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
+(terminal is in cbreak mode once engaged; SPACE held = gripper close, A/D or Left/Right held =
+base-yaw jog at --jog-deg-s; the same keys on the /teleop web page, --web PORT, have real key-up
+so no repeat lag), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
 ``TeleopMonitor`` fault, a panto drive leaving CLOSED_LOOP, joint-limit
 violation, I²t trip, oscillation guard, or any exception. Safe stop = YAM ->
 gravity-comp idle (NOT zero torque: J2 carries the arm against gravity), panto
@@ -87,6 +89,9 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--no-grip-key", action="store_true",
                    help="disable the teleop keys (SPACE held = gripper close, A/D or Left/Right held = base yaw jog)")
     p.add_argument("--jog-deg-s", type=float, default=30.0, help="base-yaw jog rate while A/D or an arrow is held")
+    p.add_argument("--web", type=int, default=8081, metavar="PORT",
+                   help="serve the /teleop key page (real keydown/keyup -- no auto-repeat lag) + live state on this "
+                        "port; 0 disables. Terminal keys keep working alongside it")
     p.add_argument("--reflect", action="store_true",
                    help="ALSO feed measured YAM external torque (x --alpha) to panto. Off by default: in contact\n"
                         "the follower's PD torque already IS the external torque, so this double-counts what\n"
@@ -210,8 +215,9 @@ class _StopFlag:
         return self.held(" ")
 
     def jog(self) -> float:
-        """-1 / 0 / +1 for A|Left / none / D|Right held."""
-        return float(self.held("right")) - float(self.held("left"))
+        """+1 / 0 / -1 for A|Left / none / D|Right held (A = +yaw, per the rig: base yaw is
+        positive to the operator's left)."""
+        return float(self.held("left")) - float(self.held("right"))
 
     def _press(self, key: str) -> None:
         now = time.monotonic()
@@ -536,6 +542,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
     link = CanLink(config, sim=args.sim)
     backend = PositionBackend(link, config)
     follower: _Follower | None = None
+    web = None
     armed = False
 
     def _safe_stop(reason: str) -> None:
@@ -575,6 +582,11 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             follower.hold = np.asarray(follower.robot.get_joint_pos(), float).copy()
             q_p0, _ = link.joint_state()
         stop.watch_stdin()
+        if args.web:
+            from panto.teleop_web import TeleopWeb
+            web = TeleopWeb(port=args.web)
+            web.start()
+            log.event(f"teleop key page: {web.url}")
         q_y, _, _, _ = follower.read()
         q_y0 = q_y[follower.idx].copy()
         if args.yam_box_deg:
@@ -653,6 +665,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         while True:
             now = time.monotonic()
             t, dt, last = now - t0, now - last, now
+            if web is not None and web.stop_reason() is not None:
+                stop.set(web.stop_reason())
             if stop.reason is not None:
                 raise EStop(stop.reason)
             if args.duration and t >= args.duration:
@@ -675,9 +689,11 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_y_cmd = limiter.step(q_y_target, dt)
             q_meas = q_y[follower.idx]
             q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
-            grip_close = (not args.no_grip_key) and stop.space_held()
+            web_space = web is not None and web.held("space")
+            web_jog = web.jog() if web is not None else 0.0
+            grip_close = (not args.no_grip_key) and (stop.space_held() or web_space)
             grip = follower.set_grip(grip_close, dt) if not args.no_grip_key else follower.grip
-            jog = 0.0 if args.no_grip_key else stop.jog()
+            jog = 0.0 if args.no_grip_key else float(np.clip(stop.jog() - web_jog, -1.0, 1.0))  # web: A/Left = +yaw too
             base = follower.jog_base(jog, dt, np.radians(args.jog_deg_s))
             follower.command(q_y_cmd)
 
@@ -710,6 +726,14 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
                        grip_close=grip_close, grip_cmd=grip, jog=jog, base_cmd=base, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
                        panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
+            if web is not None:
+                web.publish({"t": round(t, 2), "panto_deg": np.degrees(q_p).round(1).tolist(),
+                             "yam_deg": np.degrees(q_y[follower.idx]).round(1).tolist(),
+                             "lead_deg": np.degrees(q_y_cmd - q_meas).round(1).tolist(),
+                             "boxed": boxed.tolist(), "yam_tau_ext_nm": tau_ext.round(2).tolist(),
+                             "panto_iq_a": np.round(cur, 2).tolist(), "base_deg": round(float(np.degrees(base)), 1),
+                             "grip": round(grip, 2), "grip_close": grip_close, "jog": jog,
+                             "fault": fault or ""})
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
 
@@ -740,6 +764,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                 follower.close()
             except Exception as exc:  # noqa: BLE001
                 log.event(f"YAM close failed: {exc!r}", level="ERROR")
+        if web is not None:
+            web.stop()
         link.close()
         log.close()
 
