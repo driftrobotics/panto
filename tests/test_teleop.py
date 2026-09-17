@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from panto.teleop import EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
+from panto.teleop import BuzzDetector, EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
 
 
 def _map(scale=(1.0, -2.0)):
@@ -94,3 +94,14 @@ def test_monitor_faults_and_latches(over, name):
     fault = mon.check(**_ok(**over))
     assert fault is not None and fault.startswith(name)
     assert mon.check(**_ok()) == fault                             # latched
+
+
+def test_buzz_detector_ignores_hand_motion_and_catches_oscillation():
+    ts = np.arange(0, 2.0, 0.005)
+    hand = BuzzDetector()
+    assert all(hand.step(t, [2.0 * np.sin(2 * np.pi * 1.0 * t), 0.0]) is None for t in ts)   # 1 Hz sweep
+    buzz = BuzzDetector()
+    trips = [buzz.step(t, [0.0, 1.0 * np.sin(2 * np.pi * 12.0 * t)]) for t in ts]           # 12 Hz
+    assert any(r is not None and r.startswith("joint1") for r in trips)
+    quiet = BuzzDetector()
+    assert all(quiet.step(t, [0.05 * np.sin(2 * np.pi * 30.0 * t), 0.0]) is None for t in ts)  # below min_vel
