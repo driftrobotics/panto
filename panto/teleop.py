@@ -99,6 +99,32 @@ class EffortReflector:
         return np.clip(out, -self._tau_max, self._tau_max)
 
 
+class BuzzDetector:
+    """Leader oscillation detector that tolerates deliberate hand motion (the
+    pose-std OscillationGuard does not: a moving leader *is* pose variance).
+    Trips when any joint's velocity reverses sign >= ``flips`` times within
+    ``window_s`` with each swing faster than ``min_vel_rad_s`` -- i.e. a
+    sustained oscillation of >= flips/(2*window) Hz, not a hand changing direction."""
+
+    def __init__(self, window_s: float = 0.5, flips: int = 6, min_vel_rad_s: float = 0.3) -> None:
+        self._window, self._flips, self._min = float(window_s), int(flips), float(min_vel_rad_s)
+        self._last_sign = np.zeros(2)
+        self._events: list[list[float]] = [[], []]
+
+    def step(self, t: float, qd) -> str | None:
+        for j, v in enumerate(np.asarray(qd, float)):
+            if abs(v) < self._min:
+                continue
+            sign = np.sign(v)
+            if self._last_sign[j] != 0 and sign != self._last_sign[j]:
+                self._events[j].append(t)
+            self._last_sign[j] = sign
+            self._events[j] = [e for e in self._events[j] if e >= t - self._window]
+            if len(self._events[j]) >= self._flips:
+                return f"joint{j}:{len(self._events[j])}_reversals_in_{self._window}s"
+        return None
+
+
 @dataclass
 class TeleopLimits:
     """Fault thresholds. Defaults are deliberately tight for a first POC."""

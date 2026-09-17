@@ -22,9 +22,9 @@ stdin, ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
 ``TeleopMonitor`` fault, a panto drive leaving CLOSED_LOOP, joint-limit
 violation, I²t trip, oscillation guard, or any exception. Safe stop = YAM ->
 gravity-comp idle (NOT zero torque: J2 carries the arm against gravity), panto
--> relax + IDLE. The YAM stays energised in grav-comp idle until the process
-exits; i2rt's close() then zeroes torques, so support the arm or leave it
-resting before quitting if it is not in a stable pose.
+-> relax + IDLE. The YAM then keeps floating in grav-comp idle until you have
+lowered it and typed 'release' (i2rt's close() zeroes torques -> the arm drops,
+so it is never called on a timer).
 
 Every tick is logged via ``panto.telemetry.RunLogger`` (logs/teleop_yam-*/).
 """
@@ -49,7 +49,7 @@ from panto.guard import OscillationGuard
 from panto.kinematics import forward
 from panto.limits import JointLimitViolation, check_armable, check_runtime, clamp_targets, q_deg
 from panto.telemetry import LOG_ROOT, RunLogger
-from panto.teleop import EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
+from panto.teleop import BuzzDetector, EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
 
 PID_FILE = LOG_ROOT / "teleop_yam.pid"
 _VEL_GAIN_MAX = 0.05     # same ceilings as Runtime.set_tuning
@@ -94,8 +94,8 @@ def _parse() -> argparse.Namespace:
                    help="J1,J2 box half-width around the engage pose (ignored with --yam-box)")
     p.add_argument("--yam-box-deg", type=str, default=None,
                    help="absolute J1/J2 box 'lo1,hi1,lo2,hi2' deg (e.g. from --observe)")
-    p.add_argument("--yam-kp", type=_pair, default=np.array([20.0, 20.0]), help="J1,J2 MIT kp (i2rt default 80)")
-    p.add_argument("--yam-kd", type=_pair, default=np.array([2.0, 2.0]))
+    p.add_argument("--yam-kp", type=_pair, default=np.array([40.0, 40.0]), help="J1,J2 MIT kp (i2rt default 80)")
+    p.add_argument("--yam-kd", type=_pair, default=np.array([3.0, 3.0]))
     p.add_argument("--yam-rate-deg-s", type=float, default=60.0, help="follower target slew limit")
     # leader
     p.add_argument("--couple-k", type=float, default=0.3, help="leader coupling spring, N.m/rad")
@@ -211,6 +211,32 @@ class _Follower:
         self.robot.close()
 
 
+def _hold_until_released(follower: "_Follower", log: RunLogger) -> None:
+    """i2rt's close() zeroes all torques and the arm drops, so never close on a
+    timer: float in gravity-comp idle until the operator has lowered the arm and
+    says so. Signals are ignored here on purpose -- a second Ctrl-C must not
+    drop the arm. No tty -> hold until the rest pose is reached by hand."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    log.event("YAM is FLOATING in gravity-comp idle and will stay so. Lower it to the table by hand, "
+              "then type 'release' + Enter to de-energise.", level="WARN")
+    tty = sys.stdin is not None and sys.stdin.isatty()
+    while True:
+        if not follower.alive():
+            log.event("i2rt control thread is dead -- YAM is NOT being held", level="ERROR")
+            return
+        follower.idle()
+        if tty:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if ready and sys.stdin.readline().strip().lower() == "release":
+                return
+        else:
+            q, qd, _, _ = follower.read()
+            if abs(q[1]) < np.radians(5.0) and np.max(np.abs(qd[:6])) < 0.02:
+                return
+            time.sleep(0.2)
+
+
 def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
     log = RunLogger("teleop_yam_observe", yam_channel=args.yam_channel, arm=args.arm, gripper=args.gripper)
     follower = _Follower(args)
@@ -235,6 +261,7 @@ def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
                       f"tau_ext J1/J2={np.round(tau_ext[:2], 2).tolist()} N.m")
             time.sleep(1.0 / args.rate)
     finally:
+        stop.set('done')
         follower.idle()
         e = np.array(ext) if ext else np.zeros((1, 2))
         box = ",".join(f"{v:.1f}" for v in np.degrees([lo[0], hi[0], lo[1], hi[1]]))
@@ -243,6 +270,8 @@ def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
         log.event(f"tau_ext J1/J2 mean={np.round(e.mean(0), 3).tolist()} std={np.round(e.std(0), 3).tolist()} "
                   f"absmax={np.round(np.abs(e).max(0), 3).tolist()} N.m")
         log.event(f"suggested: --yam-box-deg {box}")
+        if not args.sim:
+            _hold_until_released(follower, log)
         follower.close()
         log.close()
 
@@ -350,7 +379,10 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(args.max_err_deg),
                                              follower_vel_rad_s=np.radians(args.max_vel_deg_s),
                                              follower_eff_nm=args.max_eff_nm))
-        guard = OscillationGuard(window_s=0.5, osc_mm=3.0, current_frac=0.9)
+        # pose-std check disabled (osc_mm=inf): the leader moves on purpose. Keep the
+        # pinned-current buzz/stall checks; BuzzDetector covers tip oscillation.
+        guard = OscillationGuard(window_s=0.5, osc_mm=float("inf"), current_frac=0.9)
+        buzz = BuzzDetector()
         log.event(f"engage: panto q_deg={q_deg(q_p0)}  yam q_deg={np.round(np.degrees(q_y), 1).tolist()}  "
                   f"box_deg={np.round(np.degrees([box_lo, box_hi]), 1).tolist()}")
 
@@ -430,6 +462,9 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                 tripped = guard.check()
                 if tripped is not None:
                     raise EStop(f"osc_guard:{tripped}")
+                buzzing = buzz.step(t, qd_p)
+                if buzzing is not None:
+                    raise EStop(f"osc_guard:{buzzing}")
             fault = monitor.check(q_cmd=q_y_cmd, q_meas=q_y[:2], qd_meas=qd_y[:2], tau_ext=tau_ext,
                                   held_err=q_y[2:6] - follower.hold[2:6],
                                   leader_age_s=link.feedback_age_s(), follower_age_s=y_age,
@@ -459,11 +494,11 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         reason = f"loop:{type(exc).__name__}:{exc}"
         raise
     finally:
+        stop.set(reason)   # retires the Enter-watcher so the release prompt owns stdin
         _safe_stop(reason)
         if follower is not None:
-            if not args.sim and armed:
-                log.event("YAM holding in gravity-comp idle for 3 s before release -- support the arm")
-                time.sleep(3.0)
+            if not args.sim:
+                _hold_until_released(follower, log)
             try:
                 follower.close()
             except Exception as exc:  # noqa: BLE001
