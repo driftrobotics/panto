@@ -6,8 +6,8 @@ joint3 elbow: two parallel hinge axes, like panto). Help text below that says "J
 
     python -m scripts.teleop_yam --sim                  # both robots simulated, no CAN
     python -m scripts.teleop_yam --observe              # YAM only: grav-comp idle, print pose + effort noise
-    python -m scripts.teleop_yam --no-reflect           # position-position coupling only
-    python -m scripts.teleop_yam                        # coupling + effort reflection
+    python -m scripts.teleop_yam --reflect              # + measured-effort reflection on top
+    python -m scripts.teleop_yam                        # bilateral lead coupling (default)
     python -m scripts.teleop_yam --stop                 # E-STOP a running instance from another shell
 
 One process, one ~200 Hz loop, both buses (panto: config CAN channel; YAM:
@@ -22,7 +22,7 @@ i2rt runs its gripper limit calibration at startup (the gripper opens/closes)
 unless --gripper-limits is given.
 
 E-stop (every path ends in the same ``_safe_stop``): Ctrl-C / SIGTERM, Enter / q / Esc
-(terminal is in cbreak mode once engaged; SPACE held = gripper close, A/D or Left/Right\nheld = base-yaw jog at --jog-deg-s), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
+(terminal is in cbreak mode once engaged; SPACE held = gripper close, A/D or Left/Right held = base-yaw jog at --jog-deg-s), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
 ``TeleopMonitor`` fault, a panto drive leaving CLOSED_LOOP, joint-limit
 violation, I²t trip, oscillation guard, or any exception. Safe stop = YAM ->
 gravity-comp idle (NOT zero torque: J2 carries the arm against gravity), panto
@@ -51,7 +51,7 @@ import numpy as np
 from panto.backends import PositionBackend
 from panto.can_link import AXIS_STATE_CLOSED_LOOP_CONTROL, CanLink, CanLinkError, decode_error_flags
 from panto.config import Config
-from panto.limits import JointLimitViolation, check_armable, check_runtime, clamp_targets, q_deg
+from panto.limits import JointLimitViolation, check_armable, clamp_targets, q_deg
 from panto.telemetry import LOG_ROOT, RunLogger
 from panto.teleop import BuzzDetector, EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
 
@@ -87,7 +87,11 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--no-grip-key", action="store_true",
                    help="disable the teleop keys (SPACE held = gripper close, A/D or Left/Right held = base yaw jog)")
     p.add_argument("--jog-deg-s", type=float, default=30.0, help="base-yaw jog rate while A/D or an arrow is held")
-    p.add_argument("--no-reflect", action="store_true", help="position-position coupling only")
+    p.add_argument("--reflect", action="store_true",
+                   help="ALSO feed measured YAM external torque (x --alpha) to panto. Off by default: in contact\n"
+                        "the follower's PD torque already IS the external torque, so this double-counts what\n"
+                        "the lead spring renders")
+    p.add_argument("--no-reflect", action="store_true", help=argparse.SUPPRESS)  # old default; kept as a no-op
     p.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until e-stop")
     p.add_argument("--rate", type=float, default=250.0,
                    help="loop + log Hz. 250 = i2rt's own motor-chain rate (CONTROL_FREQ), the fastest new YAM\n"
@@ -117,12 +121,16 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--yam-box-deg", type=str, default=None,
                    help="absolute J1/J2 box 'lo1,hi1,lo2,hi2' deg (e.g. from --observe)")
     p.add_argument("--yam-kp", type=_pair, default=np.array([80.0, 80.0]),
-                   help="J1,J2 MIT kp (i2rt default 80; softer does not break J2 stiction)")
+                   help="MAX allowable follower kp (i2rt default 80; softer than ~60 does not break stiction)")
     p.add_argument("--yam-kd", type=_pair, default=np.array([5.0, 5.0]))
-    p.add_argument("--yam-rate-deg-s", type=float, default=120.0, help="follower target slew limit")
-    # leader
-    p.add_argument("--couple-k", type=float, default=0.3, help="leader coupling spring, N.m/rad")
-    p.add_argument("--current", type=float, default=0.8, help="panto per-axis current cap, A")
+    p.add_argument("--yam-rate-deg-s", type=float, default=240.0, help="follower target slew limit")
+    # bilateral coupling: one "lead" range, linear on both sides, saturating together
+    p.add_argument("--lead-max-deg", type=float, default=8.0,
+                   help="lead (panto ahead of YAM, in YAM degrees) at which BOTH sides saturate: the YAM at\n"
+                        "--yam-tau-max and panto at --current. Inside it both torques are linear in lead")
+    p.add_argument("--yam-tau-max", type=_pair, default=np.array([12.0, 12.0]),
+                   help="joint2,joint3 max PD torque, N.m (kp = tau-max / lead-max, capped at --yam-kp)")
+    p.add_argument("--current", type=float, default=0.8, help="panto per-axis current cap, A (= panto's max)")
     p.add_argument("--vel-gain", type=_pair, default=None, help="override panto vel_gain 'v' or 'v0,v1'")
     # reflection
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
@@ -141,7 +149,9 @@ def _parse() -> argparse.Namespace:
                    help="J1,J2 constant tau_ext bias under PD (gravity-model error; pose dependent)")
     p.add_argument("--sim-tau", type=_pair, default=None, help="--sim only: fake YAM external torque, N.m")
     # faults
-    p.add_argument("--max-err-deg", type=float, default=20.0)
+    p.add_argument("--max-err-deg", type=float, default=None,
+                   help="follower tracking-error fault, deg (default 2.5 x lead-max: the command itself is\n"
+                        "clamped to lead-max ahead of the measured joint, so more means the arm is stuck)")
     p.add_argument("--max-vel-deg-s", type=float, default=200.0)
     p.add_argument("--max-eff-nm", type=float, default=16.0,
                    help="|tau_ext| fault. kp 80 x 8 deg of ordinary dynamic lag is already 11 N.m (8 N.m\n"
@@ -264,7 +274,10 @@ class _Follower:
             raise SystemExit("--yam-joints needs two distinct arm joints in 0..5")
         self.held = [i for i in range(6) if i not in self.idx]
         self.names = "/".join(f"joint{i + 1}" for i in self.idx)
-        kp[self.idx], kd[self.idx] = args.yam_kp, args.yam_kd
+        lead = np.radians(args.lead_max_deg)
+        kp_lead = np.minimum(np.asarray(args.yam_tau_max, float) / lead, np.asarray(args.yam_kp, float))
+        self.tau_max = kp_lead * lead                       # what the drives actually render at lead-max
+        kp[self.idx], kd[self.idx] = kp_lead, args.yam_kd
         self.has_gripper = self.n > 6
         self._grip_gains = (kp[6:].copy(), kd[6:].copy())
         kp[6:], kd[6:] = 0.0, 0.0   # gripper limp until a grip command arrives (set_grip)
@@ -327,6 +340,21 @@ class _Follower:
 
     def close(self) -> None:
         self.robot.close()
+
+
+def _limit_wall(motor, q: float) -> float:
+    """Soft wall (N.m) inside panto's joint-limit margin, so a hand pushing the leader to its
+    hard stop feels a ramp rather than a trip: the runtime's check_runtime rule is for
+    spring-driven motion, not user-led motion. Peak = 2 x the leader cap, so it wins."""
+    lo, hi, margin = float(motor.q_min_rad), float(motor.q_max_rad), float(motor.limit_margin_rad)
+    if not np.isfinite(lo) or margin <= 0:
+        return 0.0
+    peak = 2.0 * float(motor.current_soft_max) * float(motor.torque_constant)
+    if q < lo + margin:
+        return peak * min(1.0, (lo + margin - q) / margin)
+    if q > hi - margin:
+        return -peak * min(1.0, (q - (hi - margin)) / margin)
+    return 0.0
 
 
 def _hold_until_released(follower: "_Follower", log: RunLogger, stop: "_StopFlag") -> None:
@@ -574,7 +602,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         limiter = RateLimiter(np.radians(args.yam_rate_deg_s), q_y0)
         reflector = EffortReflector(args.alpha, args.scale, cutoff_hz=args.cutoff_hz,
                                     deadband_nm=args.deadband_nm, tau_max_nm=tau_max)
-        monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(args.max_err_deg),
+        max_err = args.max_err_deg if args.max_err_deg is not None else 2.5 * args.lead_max_deg
+        monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(max_err),
                                              follower_vel_rad_s=np.radians(args.max_vel_deg_s),
                                              follower_eff_nm=args.max_eff_nm))
         # No OscillationGuard here: both of its checks assume a stationary hold. A moving
@@ -604,7 +633,15 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         armed = True
         for i, nid in enumerate(nodes):
             link.set_vel_gains(nid, float(config.motors[i].vel_gain), 0.0)
-        pos_gains = [PositionBackend._pos_gain(m, args.couple_k) for m in config.motors]
+        # Leader spring: saturates (current cap) at the same lead the follower saturates at.
+        lead_y = np.radians(args.lead_max_deg)
+        lead_p = lead_y / np.abs(args.scale)                                # lead-max in panto rad
+        k_lead = np.array([args.current * float(m.torque_constant) for m in config.motors]) / lead_p
+        pos_gains = [PositionBackend._pos_gain(m, float(k_lead[i])) for i, m in enumerate(config.motors)]
+        log.event(f"coupling: lead-max {args.lead_max_deg} deg -> follower kp "
+                  f"{np.round(follower._kp[follower.idx], 1).tolist()} (tau {np.round(follower.tau_max, 1).tolist()} N.m), "
+                  f"leader k {np.round(k_lead, 3).tolist()} N.m/rad "
+                  f"(tau {np.round(k_lead * lead_p * 1e3, 1).tolist()} mN.m at {args.current} A)")
         vel_limit = backend.vel_limit_rad_s
         follower.command(q_y0)
 
@@ -627,7 +664,6 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                     raise EStop(f"drive:axis{s.node_id}:{decode_error_flags(s.disarm_reason or 0)}")
 
             q_p, qd_p = link.joint_state()
-            check_runtime(q_p, config.motors)
             q_y, qd_y, tau_ext_all, y_age = follower.read()
             tau_raw = tau_ext_all[follower.idx] - tau_bias
             tau_ext = tau_raw - args.yam_bias_nm - args.yam_friction_nm * np.tanh(qd_y[follower.idx] / 0.05)
@@ -637,6 +673,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             # follower: mapped, boxed, slew-limited
             q_y_target, boxed = jmap.to_follower(q_p)
             q_y_cmd = limiter.step(q_y_target, dt)
+            q_meas = q_y[follower.idx]
+            q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
             grip_close = (not args.no_grip_key) and stop.space_held()
             grip = follower.set_grip(grip_close, dt) if not args.no_grip_key else follower.grip
             jog = 0.0 if args.no_grip_key else stop.jog()
@@ -645,10 +683,10 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
 
             # leader: spring to the mapped-back measured follower + reflected torque
             q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx]), config.motors)
-            tau_reflect = np.zeros(2) if args.no_reflect else reflector.step(tau_ext, dt)
+            tau_reflect = reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
             tau_ff = []
             for i, motor in enumerate(config.motors):
-                ff = float(tau_reflect[i]) + PositionBackend._hold_ff(motor, q_p)
+                ff = float(tau_reflect[i]) + PositionBackend._hold_ff(motor, q_p) + _limit_wall(motor, float(q_p[i]))
                 link.set_input_pos(motor.node_id, float(q_p_target[i]), torque_ff_nm=ff)
                 link.set_pos_gain(motor.node_id, pos_gains[i])
                 link.set_limits(motor.node_id, vel_limit, args.current)
