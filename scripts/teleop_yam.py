@@ -110,7 +110,12 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
                    help="panto N.m per YAM N.m of external torque")
     p.add_argument("--cutoff-hz", type=float, default=8.0)
-    p.add_argument("--deadband-nm", type=_pair, default=np.array([0.3, 0.3]))
+    p.add_argument("--deadband-nm", type=_pair, default=np.array([0.3, 0.8]))
+    # 2026-09-17 --wiggle at J2~70 deg, kp 80: free-motion tau_ext J1 +0.43/-0.40, J2 +0.56/-2.06 N.m
+    p.add_argument("--yam-friction-nm", type=_pair, default=np.array([0.42, 1.3]),
+                   help="J1,J2 Coulomb friction removed from tau_ext (x tanh(qd/0.05))")
+    p.add_argument("--yam-bias-nm", type=_pair, default=np.array([0.0, -0.75]),
+                   help="J1,J2 constant tau_ext bias under PD (gravity-model error; pose dependent)")
     p.add_argument("--sim-tau", type=_pair, default=None, help="--sim only: fake YAM external torque, N.m")
     # faults
     p.add_argument("--max-err-deg", type=float, default=20.0)
@@ -497,7 +502,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_p, qd_p = link.joint_state()
             check_runtime(q_p, config.motors)
             q_y, qd_y, tau_ext_all, y_age = follower.read()
-            tau_ext = tau_ext_all[:2] - tau_bias
+            tau_raw = tau_ext_all[:2] - tau_bias
+            tau_ext = tau_raw - args.yam_bias_nm - args.yam_friction_nm * np.tanh(qd_y[:2] / 0.05)
             if args.sim and args.sim_tau is not None:
                 tau_ext = tau_ext + args.sim_tau
 
@@ -538,7 +544,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
-                       yam_tau_ext=tau_ext, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
+                       yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
 
