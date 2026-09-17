@@ -1,0 +1,217 @@
+"""Minimal web UI for jogging/e-stopping teleop from a browser.
+
+Runs its own aiohttp server on a daemon thread with its own asyncio event
+loop, independent of any other web server in the process (see ``panto/web.py``
+for the project's main UI server, which this does not touch). The control
+thread (250 Hz) only ever calls the small, lock-cheap, non-blocking surface:
+``held``/``jog``/``stop_reason``/``publish``.
+
+Keys are tracked per-websocket-connection and OR-ed across connections, so
+one client's stuck key can't be silently cleared by another client's clean
+disconnect. A connection's keys are released wholesale on disconnect or on an
+explicit ``{"type": "blur"}"`` message (mirrors the browser losing focus).
+
+``stop_reason`` latches "web:estop" forever once tripped -- the control loop
+is expected to treat it like any other e-stop and require an out-of-band
+restart, not clear it itself.
+
+Interface frozen in CONTRACTS.md ("Teleop web keys (`/teleop`)").
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import threading
+from pathlib import Path
+
+from aiohttp import WSMsgType, web
+
+log = logging.getLogger(__name__)
+
+UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+
+_KEYS = ("space", "left", "right")
+BROADCAST_HZ = 30.0
+
+
+class TeleopWeb:
+    def __init__(self, *, host: str = "0.0.0.0", port: int = 8081) -> None:
+        self._host = host
+        self._port = port
+
+        # Guards everything below -- polled from the control thread.
+        self._lock = threading.Lock()
+        self._keys_by_conn: dict[int, set[str]] = {}
+        self._stop_reason: str | None = None
+        self._state: dict = {}
+
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._runner: web.AppRunner | None = None
+        self._site: web.TCPSite | None = None
+        self._app: web.Application | None = None
+        self._clients: set[web.WebSocketResponse] = set()
+        self._broadcast_task: asyncio.Task | None = None
+        self._ready = threading.Event()
+
+    # ------------------------------------------------------------------ lifecycle
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="teleop-web", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=10.0)
+
+    def stop(self) -> None:
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        fut = asyncio.run_coroutine_threadsafe(self._async_stop(), loop)
+        try:
+            fut.result(timeout=5.0)
+        except Exception:  # noqa: BLE001 - best-effort shutdown
+            log.exception("TeleopWeb.stop failed")
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        self._loop = None
+        self._thread = None
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._async_start())
+        self._ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    async def _async_start(self) -> None:
+        app = web.Application()
+        app.router.add_get("/teleop", self._teleop_page)
+        app.router.add_get("/ws", self._ws)
+        self._app = app
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, self._host, self._port)
+        await self._site.start()
+        self._broadcast_task = asyncio.ensure_future(self._broadcast_loop())
+        log.info("teleop web on %s", self.url)
+
+    async def _async_stop(self) -> None:
+        if self._broadcast_task is not None:
+            self._broadcast_task.cancel()
+            try:
+                await self._broadcast_task
+            except asyncio.CancelledError:
+                pass
+        for ws in list(self._clients):
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._runner is not None:
+            await self._runner.cleanup()
+        self._loop.stop()
+
+    @property
+    def url(self) -> str:
+        host = self._host if self._host != "0.0.0.0" else "localhost"
+        return f"http://{host}:{self._port}/teleop"
+
+    # ------------------------------------------------------------------ control-thread surface
+
+    def held(self, key: str) -> bool:
+        with self._lock:
+            return any(key in keys for keys in self._keys_by_conn.values())
+
+    def jog(self) -> float:
+        left = self.held("left")
+        right = self.held("right")
+        if left and not right:
+            return -1.0
+        if right and not left:
+            return 1.0
+        return 0.0
+
+    def stop_reason(self) -> str | None:
+        with self._lock:
+            return self._stop_reason
+
+    def publish(self, state: dict) -> None:
+        with self._lock:
+            self._state = dict(state)
+
+    # ------------------------------------------------------------------ http/ws
+
+    async def _teleop_page(self, _request: web.Request) -> web.FileResponse:
+        return web.FileResponse(UI_DIR / "teleop.html")
+
+    async def _ws(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+        self._clients.add(ws)
+        conn_id = id(ws)
+        with self._lock:
+            self._keys_by_conn[conn_id] = set()
+        await ws.send_json({"type": "hello", "keys": []})
+        try:
+            async for msg in ws:
+                if msg.type is WSMsgType.TEXT:
+                    try:
+                        self._dispatch(conn_id, json.loads(msg.data))
+                    except Exception:
+                        log.exception("bad client message: %s", msg.data)
+                elif msg.type is WSMsgType.ERROR:
+                    break
+        finally:
+            self._clients.discard(ws)
+            with self._lock:
+                self._keys_by_conn.pop(conn_id, None)
+        return ws
+
+    def _dispatch(self, conn_id: int, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "key":
+            key = msg.get("key")
+            down = bool(msg.get("down"))
+            if key not in _KEYS:
+                return
+            with self._lock:
+                keys = self._keys_by_conn.setdefault(conn_id, set())
+                if down:
+                    keys.add(key)
+                else:
+                    keys.discard(key)
+        elif kind == "blur":
+            with self._lock:
+                self._keys_by_conn[conn_id] = set()
+        elif kind == "estop":
+            with self._lock:
+                self._stop_reason = "web:estop"
+        else:
+            log.debug("ignoring message kind=%r", kind)
+
+    # ------------------------------------------------------------------ broadcast
+
+    async def _broadcast_loop(self) -> None:
+        period = 1.0 / BROADCAST_HZ
+        while True:
+            await asyncio.sleep(period)
+            if not self._clients:
+                continue
+            with self._lock:
+                state = dict(self._state)
+            payload = json.dumps({"type": "state", **state})
+            for ws in list(self._clients):
+                if ws.closed:
+                    self._clients.discard(ws)
+                    continue
+                try:
+                    await ws.send_str(payload)
+                except Exception:  # noqa: BLE001
+                    self._clients.discard(ws)
