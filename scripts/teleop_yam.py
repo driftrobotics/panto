@@ -76,6 +76,10 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--stop", action="store_true", help="E-STOP the running instance and exit")
     p.add_argument("--sim", action="store_true", help="simulate both robots (no CAN)")
     p.add_argument("--observe", action="store_true", help="YAM only, grav-comp idle, no panto, no motion")
+    p.add_argument("--wiggle", action="store_true",
+                   help="YAM only: slow sine on J1/J2 about the hand-placed pose (breakaway / friction ID)")
+    p.add_argument("--wiggle-deg", type=float, default=5.0)
+    p.add_argument("--wiggle-hz", type=float, default=0.2)
     p.add_argument("--no-reflect", action="store_true", help="position-position coupling only")
     p.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until e-stop")
     p.add_argument("--rate", type=float, default=200.0, help="loop Hz")
@@ -94,8 +98,9 @@ def _parse() -> argparse.Namespace:
                    help="J1,J2 box half-width around the engage pose (ignored with --yam-box)")
     p.add_argument("--yam-box-deg", type=str, default=None,
                    help="absolute J1/J2 box 'lo1,hi1,lo2,hi2' deg (e.g. from --observe)")
-    p.add_argument("--yam-kp", type=_pair, default=np.array([40.0, 40.0]), help="J1,J2 MIT kp (i2rt default 80)")
-    p.add_argument("--yam-kd", type=_pair, default=np.array([3.0, 3.0]))
+    p.add_argument("--yam-kp", type=_pair, default=np.array([80.0, 80.0]),
+                   help="J1,J2 MIT kp (i2rt default 80; softer does not break J2 stiction)")
+    p.add_argument("--yam-kd", type=_pair, default=np.array([5.0, 5.0]))
     p.add_argument("--yam-rate-deg-s", type=float, default=60.0, help="follower target slew limit")
     # leader
     p.add_argument("--couple-k", type=float, default=0.3, help="leader coupling spring, N.m/rad")
@@ -237,6 +242,65 @@ def _hold_until_released(follower: "_Follower", log: RunLogger) -> None:
             time.sleep(0.2)
 
 
+def _wiggle(args: argparse.Namespace, stop: _StopFlag) -> None:
+    """One joint at a time (J1 then J2), 2 periods each, amplitude ramped in."""
+    log = RunLogger("teleop_yam_wiggle", **vars(args))
+    follower = _Follower(args)
+    monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(10.0),
+                                         follower_vel_rad_s=np.radians(args.max_vel_deg_s),
+                                         follower_eff_nm=args.max_eff_nm))
+    reason = "done"
+    try:
+        follower.idle()
+        if sys.stdin is not None and sys.stdin.isatty():
+            input(">>> YAM floating. Hand-place it (clear of the table by > wiggle amplitude), LET GO, "
+                  "then press Enter to start the wiggle: ")
+        stop.watch_stdin()
+        follower.hold = np.asarray(follower.robot.get_joint_pos(), float).copy()
+        q0 = follower.hold[:2].copy()
+        amp, w = np.radians(args.wiggle_deg), 2 * np.pi * args.wiggle_hz
+        seg = 2.0 / args.wiggle_hz
+        log.event(f"wiggle +-{args.wiggle_deg} deg @ {args.wiggle_hz} Hz about {np.round(np.degrees(q0), 1).tolist()}")
+        t0 = last = time.monotonic()
+        next_print = 0.0
+        while True:
+            now = time.monotonic()
+            t, dt, last = now - t0, now - last, now
+            if stop.reason is not None:
+                raise EStop(stop.reason)
+            if t >= 2 * seg:
+                break
+            if not follower.alive():
+                raise EStop("follower:i2rt control thread died")
+            j = 0 if t < seg else 1
+            ts = t - j * seg
+            cmd = q0.copy()
+            cmd[j] += amp * min(1.0, ts / 2.0) * np.sin(w * ts)
+            follower.command(cmd)
+            q, qd, tau_ext, age = follower.read()
+            fault = monitor.check(q_cmd=cmd, q_meas=q[:2], qd_meas=qd[:2], tau_ext=tau_ext[:2],
+                                  held_err=q[2:6] - follower.hold[2:6], leader_age_s=0.0,
+                                  follower_age_s=age, tick_s=dt)
+            log.sample(t=t, dt=dt, joint=j, yam_q=q, yam_qd=qd, yam_q_cmd=cmd, yam_tau_ext=tau_ext, fault=fault)
+            if fault is not None:
+                raise EStop(f"monitor:{fault}")
+            if t >= next_print:
+                next_print = t + 0.5
+                print(f"  t={t:5.1f}s J{j+1} cmd={np.degrees(cmd[j]):7.2f} meas={np.degrees(q[j]):7.2f} "
+                      f"tau_ext={tau_ext[j]:6.2f} N.m")
+            time.sleep(max(0.0, 1.0 / args.rate - (time.monotonic() - now)))
+    except EStop as exc:
+        reason = str(exc)
+    finally:
+        stop.set(reason)
+        log.event(f"E-STOP: {reason}", level="WARN")
+        follower.idle()
+        if not args.sim:
+            _hold_until_released(follower, log)
+        follower.close()
+        log.close()
+
+
 def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
     log = RunLogger("teleop_yam_observe", yam_channel=args.yam_channel, arm=args.arm, gripper=args.gripper)
     follower = _Follower(args)
@@ -296,7 +360,9 @@ def main() -> None:
     PID_FILE.write_text(str(os.getpid()))
     stop = _StopFlag()
     try:
-        if args.observe:
+        if args.wiggle:
+            _wiggle(args, stop)
+        elif args.observe:
             _observe(args, stop)
         else:
             _teleop(args, stop)
