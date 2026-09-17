@@ -83,7 +83,7 @@ def test_monitor_passes_nominal():
     ({"q_meas": [0.5, 1.0]}, "follower_tracking"),
     ({"qd_meas": [0.0, 3.0]}, "follower_overspeed"),
     ({"tau_ext": [9.0, 0.0]}, "follower_over_effort"),
-    ({"held_err": [0.0, 0.2, 0.0, 0.0]}, "held_joint_drift"),
+    ({"held_err": [0.0, 0.5, 0.0, 0.0]}, "held_joint_drift"),
     ({"leader_age_s": 0.5}, "leader_stale"),
     ({"follower_age_s": 0.5}, "follower_stale"),
     ({"tick_s": 0.2}, "loop_overrun"),

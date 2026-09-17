@@ -21,8 +21,8 @@ printed at exit as a ready-made --yam-box. NOTE: with --gripper linear_4310
 i2rt runs its gripper limit calibration at startup (the gripper opens/closes)
 unless --gripper-limits is given.
 
-E-stop (every path ends in the same ``_safe_stop``): Ctrl-C / SIGTERM, Enter on
-stdin, ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
+E-stop (every path ends in the same ``_safe_stop``): Ctrl-C / SIGTERM, Enter / q / Esc
+(terminal is in cbreak mode once engaged; SPACE held = gripper close), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
 ``TeleopMonitor`` fault, a panto drive leaving CLOSED_LOOP, joint-limit
 violation, I²t trip, oscillation guard, or any exception. Safe stop = YAM ->
 gravity-comp idle (NOT zero torque: J2 carries the arm against gravity), panto
@@ -40,7 +40,9 @@ import os
 import select
 import signal
 import sys
+import termios
 import threading
+import tty
 import time
 from pathlib import Path
 
@@ -82,6 +84,7 @@ def _parse() -> argparse.Namespace:
                    help="YAM only: slow sine on J1/J2 about the hand-placed pose (breakaway / friction ID)")
     p.add_argument("--wiggle-deg", type=float, default=5.0)
     p.add_argument("--wiggle-hz", type=float, default=0.2)
+    p.add_argument("--no-grip-key", action="store_true", help="disable SPACE-held = gripper close")
     p.add_argument("--no-reflect", action="store_true", help="position-position coupling only")
     p.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until e-stop")
     p.add_argument("--rate", type=float, default=250.0,
@@ -163,20 +166,47 @@ class _StopFlag:
         signal.signal(signal.SIGTERM, lambda *_: self.set("operator:SIGTERM"))
 
     def watch_stdin(self) -> None:
-        """Enter = e-stop from here on (started after the engage prompt)."""
+        """From here on (after the engage prompt) the terminal is in cbreak mode:
+        Enter / q / Esc = e-stop, SPACE held = gripper close."""
         if sys.stdin is not None and sys.stdin.isatty():
+            self._termios = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
             threading.Thread(target=self._watch_stdin, daemon=True).start()
+
+    def restore_tty(self) -> None:
+        if getattr(self, "_termios", None) is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._termios)
+            self._termios = None
 
     def set(self, reason: str) -> None:
         if self.reason is None:
             self.reason = reason
 
+    def space_held(self) -> bool:
+        """A terminal has no key-up event, only auto-repeat: the first repeat
+        comes after the OS repeat delay (~0.25-0.66 s), later ones every ~30 ms.
+        So: held = a space within 0.7 s until repeats are seen, then within 0.15 s."""
+        timeout = 0.15 if self._space_repeating else 0.7
+        return time.monotonic() - self._space_last < timeout
+
+    _space_last = -1e9
+    _space_repeating = False
+
     def _watch_stdin(self) -> None:
         while self.reason is None:
-            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-            if ready:
-                sys.stdin.readline()
-                self.set("operator:enter")
+            ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if not ready:
+                if not self.space_held():
+                    self._space_repeating = False
+                continue
+            ch = os.read(sys.stdin.fileno(), 1)
+            if ch == b" ":
+                now = time.monotonic()
+                if now - self._space_last < 0.12:
+                    self._space_repeating = True
+                self._space_last = now
+            elif ch in (b"\n", b"\r", b"q", b"\x1b"):
+                self.set("operator:key")
 
 
 class _Follower:
@@ -205,7 +235,10 @@ class _Follower:
         self.held = [i for i in range(6) if i not in self.idx]
         self.names = "/".join(f"joint{i + 1}" for i in self.idx)
         kp[self.idx], kd[self.idx] = args.yam_kp, args.yam_kd
-        kp[6:], kd[6:] = 0.0, 0.0   # gripper stays limp: never drive it toward a hold value
+        self.has_gripper = self.n > 6
+        self._grip_gains = (kp[6:].copy(), kd[6:].copy())
+        kp[6:], kd[6:] = 0.0, 0.0   # gripper limp until a grip command arrives (set_grip)
+        self.grip = float(self.hold[6]) if self.has_gripper else 0.0
         self._kp, self._kd = kp, kd
         info = self.robot.get_robot_info() if hasattr(self.robot, "get_robot_info") else {}
         self.joint_limits = np.asarray(info.get("joint_limits"), float) if info.get("joint_limits") is not None \
@@ -229,6 +262,17 @@ class _Follower:
         thread = getattr(self.robot, "_server_thread", None)
         return thread is None or thread.is_alive()
 
+    def set_grip(self, close: bool, dt: float, rate_per_s: float = 2.5) -> float:
+        """Normalised gripper target, 0 = closed .. 1 = open, slewed (full stroke in
+        0.4 s). i2rt's own gripper force limiter (50 N) stays in charge of squeeze."""
+        if not self.has_gripper:
+            return 0.0
+        self._kp[6:], self._kd[6:] = self._grip_gains
+        step = rate_per_s * max(dt, 0.0)
+        self.grip = float(np.clip(self.grip + np.clip((0.0 if close else 1.0) - self.grip, -step, step), 0.0, 1.0))
+        self.hold[6] = self.grip
+        return self.grip
+
     def command(self, q12: np.ndarray) -> None:
         pos = self.hold.copy()
         pos[self.idx] = q12
@@ -245,13 +289,17 @@ class _Follower:
         self.robot.close()
 
 
-def _hold_until_released(follower: "_Follower", log: RunLogger) -> None:
+def _hold_until_released(follower: "_Follower", log: RunLogger, stop: "_StopFlag") -> None:
     """i2rt's close() zeroes all torques and the arm drops, so never close on a
     timer: float in gravity-comp idle until the operator has lowered the arm and
     says so. Signals are ignored here on purpose -- a second Ctrl-C must not
     drop the arm. No tty -> hold until the rest pose is reached by hand."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(0.1)          # let the key watcher see stop.reason and exit
+    stop.restore_tty()
+    if sys.stdin is not None and sys.stdin.isatty():
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)   # drop queued spaces / keys
     log.event("YAM is FLOATING in gravity-comp idle and will stay so. Lower it to the table by hand, "
               "then type 'release' + Enter to de-energise.", level="WARN")
     tty = sys.stdin is not None and sys.stdin.isatty()
@@ -327,7 +375,7 @@ def _wiggle(args: argparse.Namespace, stop: _StopFlag) -> None:
         log.event(f"E-STOP: {reason}", level="WARN")
         follower.idle()
         if not args.sim:
-            _hold_until_released(follower, log)
+            _hold_until_released(follower, log, stop)
         follower.close()
         log.close()
 
@@ -367,7 +415,7 @@ def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
                   f"absmax={np.round(np.abs(e).max(0), 3).tolist()} N.m")
         log.event(f"suggested: --yam-box-deg {box}")
         if not args.sim:
-            _hold_until_released(follower, log)
+            _hold_until_released(follower, log, stop)
         follower.close()
         log.close()
 
@@ -399,6 +447,7 @@ def main() -> None:
         else:
             _teleop(args, stop)
     finally:
+        stop.restore_tty()
         PID_FILE.unlink(missing_ok=True)
 
 
@@ -548,6 +597,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             # follower: mapped, boxed, slew-limited
             q_y_target, boxed = jmap.to_follower(q_p)
             q_y_cmd = limiter.step(q_y_target, dt)
+            grip_close = (not args.no_grip_key) and stop.space_held()
+            grip = follower.set_grip(grip_close, dt) if not args.no_grip_key else follower.grip
             follower.command(q_y_cmd)
 
             # leader: spring to the mapped-back measured follower + reflected torque
@@ -577,7 +628,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
-                       yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
+                       grip_close=grip_close, grip_cmd=grip, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
                        panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
@@ -604,7 +655,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         _safe_stop(reason)
         if follower is not None:
             if not args.sim:
-                _hold_until_released(follower, log)
+                _hold_until_released(follower, log, stop)
             try:
                 follower.close()
             except Exception as exc:  # noqa: BLE001

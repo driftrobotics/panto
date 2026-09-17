@@ -142,7 +142,8 @@ class TeleopLimits:
     follower_err_rad: float = 0.35      # |cmd - measured| on J1/J2: follower is blocked hard / lost
     follower_vel_rad_s: float = 2.0     # J1/J2 measured speed
     follower_eff_nm: float = 8.0        # |tau_ext| on J1/J2
-    held_drift_rad: float = 0.15        # J3..J6 moved away from their hold pose
+    held_drift_rad: float = 0.45        # held joints moved away from their hold pose (wrist roll at
+                                        # i2rt's kp 10 sags ~9 deg in normal use: 2026-09-17 false trip)
     leader_age_s: float = 0.1           # panto feedback staleness
     follower_age_s: float = 0.1         # YAM observation unchanged for this long
     loop_overrun_s: float = 0.05        # one tick took this long
