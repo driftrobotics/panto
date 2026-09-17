@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>panto teleop</title>
+<style>
+  :root {
+    --bg:#0d0f14; --panel:#161a22; --line:#262c38; --text:#e6e9ef; --muted:#8b93a3;
+    --dot:#5064c8; --warn:#d4763a; --ok:#4ba36a; --bad:#b4453f;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:grid; justify-items:center; gap:16px; padding:16px;
+  }
+  h1 { font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:600; margin:0; }
+  #status { font-size:12px; color:var(--muted); }
+  #status::before { content:"● "; }
+  #status.live::before { color:var(--ok); } #status.dead::before { color:var(--bad); }
+  .panel {
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:14px 16px; width:min(92vw, 480px);
+  }
+  #keys { display:flex; gap:8px; justify-content:center; margin:10px 0; }
+  .key {
+    border:1px solid var(--line); border-radius:6px; padding:10px 16px;
+    font-size:13px; color:var(--muted); min-width:70px; text-align:center;
+  }
+  .key.down { border-color:var(--dot); background:#1a1f33; color:var(--text); }
+  .hint { color:var(--muted); font-size:11px; text-align:center; margin:0 0 10px; }
+  #estop {
+    display:block; width:100%; padding:18px; margin-top:4px;
+    background:var(--bad); color:#fff; border:none; border-radius:8px;
+    font-size:16px; font-weight:700; letter-spacing:.05em; cursor:pointer;
+  }
+  #estop:hover { background:#c8534b; }
+  #estop:active { background:#96322c; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; margin:0; font-size:12px; font-variant-numeric:tabular-nums; }
+  dt { color:var(--muted); } dd { margin:0; text-align:right; word-break:break-all; }
+</style>
+</head>
+<body>
+<h1>panto teleop</h1>
+<div id="status" class="dead">connecting…</div>
+
+<div class="panel">
+  <div class="hint">Space = grip · A/D or ←/→ = jog · Esc = E-STOP</div>
+  <div id="keys">
+    <div class="key" id="k-left">◀ left</div>
+    <div class="key" id="k-space">space</div>
+    <div class="key" id="k-right">right ▶</div>
+  </div>
+  <button id="estop">E-STOP</button>
+</div>
+
+<div class="panel">
+  <dl id="state"></dl>
+</div>
+
+<script>
+let ws = null;
+const statusEl = document.getElementById('status');
+const keyEls = { space: document.getElementById('k-space'), left: document.getElementById('k-left'), right: document.getElementById('k-right') };
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+const KEY_MAP = {
+  ' ': 'space', 'Spacebar': 'space',
+  'a': 'left', 'A': 'left', 'ArrowLeft': 'left',
+  'd': 'right', 'D': 'right', 'ArrowRight': 'right',
+};
+
+function setKeyVisual(key, down) {
+  const el = keyEls[key];
+  if (el) el.classList.toggle('down', down);
+}
+
+const heldLocal = { space: false, left: false, right: false };
+
+function sendKey(key, down) {
+  if (heldLocal[key] === down) return;
+  heldLocal[key] = down;
+  setKeyVisual(key, down);
+  send({ type: 'key', key, down });
+}
+
+function releaseAll() {
+  for (const key of Object.keys(heldLocal)) sendKey(key, false);
+  send({ type: 'blur' });
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    send({ type: 'estop' });
+    e.preventDefault();
+    return;
+  }
+  const key = KEY_MAP[e.key];
+  if (!key) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  sendKey(key, true);
+});
+document.addEventListener('keyup', e => {
+  const key = KEY_MAP[e.key];
+  if (!key) return;
+  e.preventDefault();
+  sendKey(key, false);
+});
+window.addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+
+document.getElementById('estop').addEventListener('click', () => send({ type: 'estop' }));
+
+/* ------------------------------------------------------------------ state table */
+function round3sf(x) {
+  if (x === 0) return 0;
+  const d = Math.ceil(Math.log10(Math.abs(x)));
+  const power = 3 - d;
+  const mag = Math.pow(10, power);
+  return Math.round(x * mag) / mag;
+}
+function fmt(v) {
+  if (typeof v === 'number') return String(round3sf(v));
+  if (Array.isArray(v)) return v.map(x => (typeof x === 'number' ? round3sf(x) : x)).join(', ');
+  return String(v);
+}
+function renderState(msg) {
+  const dl = document.getElementById('state');
+  dl.innerHTML = '';
+  for (const [k, v] of Object.entries(msg)) {
+    if (k === 'type') continue;
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = fmt(v);
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+}
+
+/* ------------------------------------------------------------------ transport */
+let backoffMs = 500;
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    statusEl.textContent = 'connected';
+    statusEl.className = 'live';
+    backoffMs = 500;
+  };
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected — retrying';
+    statusEl.className = 'dead';
+    setTimeout(connect, backoffMs);
+    backoffMs = Math.min(backoffMs * 2, 8000);
+  };
+  ws.onerror = () => { ws.close(); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'state') renderState(m);
+  };
+}
+connect();
+</script>
+</body>
+</html>
