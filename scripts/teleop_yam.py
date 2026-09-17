@@ -462,7 +462,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                 tripped = guard.check()
                 if tripped is not None:
                     raise EStop(f"osc_guard:{tripped}")
-                buzzing = buzz.step(t, qd_p)
+                buzzing = buzz.step(t, q_p)
                 if buzzing is not None:
                     raise EStop(f"osc_guard:{buzzing}")
             fault = monitor.check(q_cmd=q_y_cmd, q_meas=q_y[:2], qd_meas=qd_y[:2], tau_ext=tau_ext,
