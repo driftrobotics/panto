@@ -110,10 +110,12 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
                    help="panto N.m per YAM N.m of external torque")
     p.add_argument("--cutoff-hz", type=float, default=8.0)
-    p.add_argument("--deadband-nm", type=_pair, default=np.array([0.3, 0.8]))
+    p.add_argument("--deadband-nm", type=_pair, default=np.array([0.8, 2.2]),
+                   help="J1,J2: covers the free-motion friction envelope (wiggle: 0.72 / 2.09 N.m about the bias)")
     # 2026-09-17 --wiggle at J2~70 deg, kp 80: free-motion tau_ext J1 +0.43/-0.40, J2 +0.56/-2.06 N.m
-    p.add_argument("--yam-friction-nm", type=_pair, default=np.array([0.42, 1.3]),
-                   help="J1,J2 Coulomb friction removed from tau_ext (x tanh(qd/0.05))")
+    p.add_argument("--yam-friction-nm", type=_pair, default=np.array([0.0, 0.0]),
+                   help="J1,J2 Coulomb friction removed from tau_ext (x tanh(qd/0.05)); off: stick phases at\n"
+                        "reversals make the residual worse than a plain deadband (wiggle: 0.42 / 1.3 N.m)")
     p.add_argument("--yam-bias-nm", type=_pair, default=np.array([0.0, -0.75]),
                    help="J1,J2 constant tau_ext bias under PD (gravity-model error; pose dependent)")
     p.add_argument("--sim-tau", type=_pair, default=None, help="--sim only: fake YAM external torque, N.m")
