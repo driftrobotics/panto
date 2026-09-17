@@ -1,4 +1,8 @@
-"""Force-feedback teleop POC: panto j0/j1 (leader) -> i2rt YAM J1/J2 (follower).
+"""Force-feedback teleop POC: panto j0/j1 (leader) -> i2rt YAM joint2/joint3 (follower).
+
+Follower joints are --yam-joints, ZERO-indexed (default 1,2 = i2rt joint2 shoulder pitch +
+joint3 elbow: two parallel hinge axes, like panto). Help text below that says "J1,J2" means
+"first,second follower joint".
 
     python -m scripts.teleop_yam --sim                  # both robots simulated, no CAN
     python -m scripts.teleop_yam --observe              # YAM only: grav-comp idle, print pose + effort noise
@@ -45,8 +49,6 @@ import numpy as np
 from panto.backends import PositionBackend
 from panto.can_link import AXIS_STATE_CLOSED_LOOP_CONTROL, CanLink, CanLinkError, decode_error_flags
 from panto.config import Config
-from panto.guard import OscillationGuard
-from panto.kinematics import forward
 from panto.limits import JointLimitViolation, check_armable, check_runtime, clamp_targets, q_deg
 from panto.telemetry import LOG_ROOT, RunLogger
 from panto.teleop import BuzzDetector, EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
@@ -88,6 +90,9 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--channel")
     # follower
     p.add_argument("--yam-channel", default="can_yam")
+    p.add_argument("--yam-joints", type=lambda t: [int(x) for x in t.split(",")], default=[1, 2],
+                   help="ZERO-indexed follower joints for panto j0,j1. Default 1,2 = i2rt joint2 (shoulder "
+                        "pitch) + joint3 (elbow); 0 is the base yaw")
     p.add_argument("--arm", default="yam")
     p.add_argument("--gripper", default="linear_4310")
     p.add_argument("--gripper-limits", type=_pair, default=None,
@@ -110,13 +115,13 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
                    help="panto N.m per YAM N.m of external torque")
     p.add_argument("--cutoff-hz", type=float, default=8.0)
-    p.add_argument("--deadband-nm", type=_pair, default=np.array([0.8, 2.2]),
+    p.add_argument("--deadband-nm", type=_pair, default=np.array([2.2, 1.5]),
                    help="J1,J2: covers the free-motion friction envelope (wiggle: 0.72 / 2.09 N.m about the bias)")
     # 2026-09-17 --wiggle at J2~70 deg, kp 80: free-motion tau_ext J1 +0.43/-0.40, J2 +0.56/-2.06 N.m
     p.add_argument("--yam-friction-nm", type=_pair, default=np.array([0.0, 0.0]),
                    help="J1,J2 Coulomb friction removed from tau_ext (x tanh(qd/0.05)); off: stick phases at\n"
                         "reversals make the residual worse than a plain deadband (wiggle: 0.42 / 1.3 N.m)")
-    p.add_argument("--yam-bias-nm", type=_pair, default=np.array([0.0, -0.75]),
+    p.add_argument("--yam-bias-nm", type=_pair, default=np.array([-0.75, 0.0]),
                    help="J1,J2 constant tau_ext bias under PD (gravity-model error; pose dependent)")
     p.add_argument("--sim-tau", type=_pair, default=None, help="--sim only: fake YAM external torque, N.m")
     # faults
@@ -183,7 +188,12 @@ class _Follower:
         self.hold = np.asarray(self.robot.get_joint_pos(), float).copy()
         kp = np.asarray(getattr(self.robot, "_kp", np.zeros(self.n)), float).copy()
         kd = np.asarray(getattr(self.robot, "_kd", np.zeros(self.n)), float).copy()
-        kp[:2], kd[:2] = args.yam_kp, args.yam_kd
+        self.idx = list(args.yam_joints)
+        if len(self.idx) != 2 or len(set(self.idx)) != 2 or not all(0 <= i < 6 for i in self.idx):
+            raise SystemExit("--yam-joints needs two distinct arm joints in 0..5")
+        self.held = [i for i in range(6) if i not in self.idx]
+        self.names = "/".join(f"joint{i + 1}" for i in self.idx)
+        kp[self.idx], kd[self.idx] = args.yam_kp, args.yam_kd
         kp[6:], kd[6:] = 0.0, 0.0   # gripper stays limp: never drive it toward a hold value
         self._kp, self._kd = kp, kd
         info = self.robot.get_robot_info() if hasattr(self.robot, "get_robot_info") else {}
@@ -209,7 +219,7 @@ class _Follower:
 
     def command(self, q12: np.ndarray) -> None:
         pos = self.hold.copy()
-        pos[:2] = q12
+        pos[self.idx] = q12
         self.robot.command_joint_state({"pos": pos, "vel": np.zeros(self.n), "kp": self._kp, "kd": self._kd})
 
     def idle(self) -> None:
@@ -264,7 +274,7 @@ def _wiggle(args: argparse.Namespace, stop: _StopFlag) -> None:
                   "then press Enter to start the wiggle: ")
         stop.watch_stdin()
         follower.hold = np.asarray(follower.robot.get_joint_pos(), float).copy()
-        q0 = follower.hold[:2].copy()
+        q0 = follower.hold[follower.idx].copy()
         amp, w = np.radians(args.wiggle_deg), 2 * np.pi * args.wiggle_hz
         seg = 2.0 / args.wiggle_hz
         log.event(f"wiggle +-{args.wiggle_deg} deg @ {args.wiggle_hz} Hz about {np.round(np.degrees(q0), 1).tolist()}")
@@ -280,21 +290,23 @@ def _wiggle(args: argparse.Namespace, stop: _StopFlag) -> None:
             if not follower.alive():
                 raise EStop("follower:i2rt control thread died")
             j = 0 if t < seg else 1
+            yj = follower.idx[j]
             ts = t - j * seg
             cmd = q0.copy()
             cmd[j] += amp * min(1.0, ts / 2.0) * np.sin(w * ts)
             follower.command(cmd)
             q, qd, tau_ext, age = follower.read()
-            fault = monitor.check(q_cmd=cmd, q_meas=q[:2], qd_meas=qd[:2], tau_ext=tau_ext[:2],
-                                  held_err=q[2:6] - follower.hold[2:6], leader_age_s=0.0,
+            fault = monitor.check(q_cmd=cmd, q_meas=q[follower.idx], qd_meas=qd[follower.idx],
+                                  tau_ext=tau_ext[follower.idx],
+                                  held_err=q[follower.held] - follower.hold[follower.held], leader_age_s=0.0,
                                   follower_age_s=age, tick_s=dt)
-            log.sample(t=t, dt=dt, joint=j, yam_q=q, yam_qd=qd, yam_q_cmd=cmd, yam_tau_ext=tau_ext, fault=fault)
+            log.sample(t=t, dt=dt, joint=yj, yam_q=q, yam_qd=qd, yam_q_cmd=cmd, yam_tau_ext=tau_ext, fault=fault)
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
             if t >= next_print:
                 next_print = t + 0.5
-                print(f"  t={t:5.1f}s J{j+1} cmd={np.degrees(cmd[j]):7.2f} meas={np.degrees(q[j]):7.2f} "
-                      f"tau_ext={tau_ext[j]:6.2f} N.m")
+                print(f"  t={t:5.1f}s joint{yj+1} cmd={np.degrees(cmd[j]):7.2f} meas={np.degrees(q[yj]):7.2f} "
+                      f"tau_ext={tau_ext[yj]:6.2f} N.m")
             time.sleep(max(0.0, 1.0 / args.rate - (time.monotonic() - now)))
     except EStop as exc:
         reason = str(exc)
@@ -324,21 +336,22 @@ def _observe(args: argparse.Namespace, stop: _StopFlag) -> None:
                 break
             q, qd, tau_ext, age = follower.read()
             lo, hi = np.minimum(lo, q), np.maximum(hi, q)
-            ext.append(tau_ext[:2].copy())
+            ext.append(tau_ext[follower.idx].copy())
             log.sample(t=t, yam_q=q, yam_qd=qd, yam_tau_ext=tau_ext, yam_age_s=age)
             if t >= next_print:
                 next_print = t + 0.5
                 print(f"  t={t:6.1f}s  q_deg={np.round(np.degrees(q[:6]), 1).tolist()}  "
-                      f"tau_ext J1/J2={np.round(tau_ext[:2], 2).tolist()} N.m")
+                      f"tau_ext {follower.names}={np.round(tau_ext[follower.idx], 2).tolist()} N.m")
             time.sleep(1.0 / args.rate)
     finally:
         stop.set('done')
         follower.idle()
         e = np.array(ext) if ext else np.zeros((1, 2))
-        box = ",".join(f"{v:.1f}" for v in np.degrees([lo[0], hi[0], lo[1], hi[1]]))
+        a, b = follower.idx
+        box = ",".join(f"{v:.1f}" for v in np.degrees([lo[a], hi[a], lo[b], hi[b]]))
         log.event(f"stop: {stop.reason or 'done'}")
         log.event(f"swept q_deg lo={np.round(np.degrees(lo), 1).tolist()} hi={np.round(np.degrees(hi), 1).tolist()}")
-        log.event(f"tau_ext J1/J2 mean={np.round(e.mean(0), 3).tolist()} std={np.round(e.std(0), 3).tolist()} "
+        log.event(f"tau_ext {follower.names} mean={np.round(e.mean(0), 3).tolist()} std={np.round(e.std(0), 3).tolist()} "
                   f"absmax={np.round(np.abs(e).max(0), 3).tolist()} N.m")
         log.event(f"suggested: --yam-box-deg {box}")
         if not args.sim:
@@ -434,7 +447,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_p0, _ = link.joint_state()
         stop.watch_stdin()
         q_y, _, _, _ = follower.read()
-        q_y0 = q_y[:2].copy()
+        q_y0 = q_y[follower.idx].copy()
         if args.yam_box_deg:
             b = np.radians([float(x) for x in args.yam_box_deg.split(",")])
             box_lo, box_hi = b[[0, 2]], b[[1, 3]]
@@ -442,8 +455,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             half = np.radians(args.yam_range_deg)
             box_lo, box_hi = q_y0 - half, q_y0 + half
         if follower.joint_limits is not None:
-            box_lo = np.maximum(box_lo, follower.joint_limits[:2, 0])
-            box_hi = np.minimum(box_hi, follower.joint_limits[:2, 1])
+            box_lo = np.maximum(box_lo, follower.joint_limits[follower.idx, 0])
+            box_hi = np.minimum(box_hi, follower.joint_limits[follower.idx, 1])
         jmap = JointMap(scale=args.scale, leader_zero=q_p0, follower_zero=q_y0,
                         follower_lo=box_lo, follower_hi=box_hi)
         limiter = RateLimiter(np.radians(args.yam_rate_deg_s), q_y0)
@@ -452,9 +465,9 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(args.max_err_deg),
                                              follower_vel_rad_s=np.radians(args.max_vel_deg_s),
                                              follower_eff_nm=args.max_eff_nm))
-        # pose-std check disabled (osc_mm=inf): the leader moves on purpose. Keep the
-        # pinned-current buzz/stall checks; BuzzDetector covers tip oscillation.
-        guard = OscillationGuard(window_s=0.5, osc_mm=float("inf"), current_frac=0.9)
+        # No OscillationGuard here: both of its checks assume a stationary hold. A moving
+        # leader is pose variance, and a leader pushed ahead of a sticky follower sits at the
+        # current cap by design (2026-09-17 false trips). BuzzDetector + I2t cover the real faults.
         buzz = BuzzDetector()
         log.event(f"engage: panto q_deg={q_deg(q_p0)}  yam q_deg={np.round(np.degrees(q_y), 1).tolist()}  "
                   f"box_deg={np.round(np.degrees([box_lo, box_hi]), 1).tolist()}")
@@ -462,16 +475,16 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         # Baseline: tau_ext while stationary in grav-comp idle is model error, not contact.
         samples = []
         for _ in range(int(0.5 * args.rate)):
-            samples.append(follower.read()[2][:2])
+            samples.append(follower.read()[2][follower.idx])
             time.sleep(1.0 / args.rate)
         tau_bias = np.mean(samples, axis=0)
-        log.event(f"tau_ext baseline J1/J2 = {np.round(tau_bias, 3).tolist()} N.m "
+        log.event(f"tau_ext baseline {follower.names} = {np.round(tau_bias, 3).tolist()} N.m "
                   f"(std {np.round(np.std(samples, axis=0), 3).tolist()})")
 
         backend.enter()
         for i, nid in enumerate(nodes):
             link.set_input_pos(nid, float(q_p0[i]))
-        log.event(">>> panto entering CLOSED_LOOP_CONTROL; YAM J1/J2 under PD <<<")
+        log.event(f">>> panto entering CLOSED_LOOP_CONTROL; YAM {follower.names} under PD <<<")
         try:
             link.enter_closed_loop(timeout=5.0)
         except CanLinkError as exc:
@@ -504,8 +517,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_p, qd_p = link.joint_state()
             check_runtime(q_p, config.motors)
             q_y, qd_y, tau_ext_all, y_age = follower.read()
-            tau_raw = tau_ext_all[:2] - tau_bias
-            tau_ext = tau_raw - args.yam_bias_nm - args.yam_friction_nm * np.tanh(qd_y[:2] / 0.05)
+            tau_raw = tau_ext_all[follower.idx] - tau_bias
+            tau_ext = tau_raw - args.yam_bias_nm - args.yam_friction_nm * np.tanh(qd_y[follower.idx] / 0.05)
             if args.sim and args.sim_tau is not None:
                 tau_ext = tau_ext + args.sim_tau
 
@@ -515,7 +528,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             follower.command(q_y_cmd)
 
             # leader: spring to the mapped-back measured follower + reflected torque
-            q_p_target = clamp_targets(jmap.to_leader(q_y[:2]), config.motors)
+            q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx]), config.motors)
             tau_reflect = np.zeros(2) if args.no_reflect else reflector.step(tau_ext, dt)
             tau_ff = []
             for i, motor in enumerate(config.motors):
@@ -529,18 +542,13 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             i2t = np.clip(i2t + (np.asarray(cur, float) ** 2 - i_cont2) * dt, 0.0, None)
             if budget > 0 and np.any(i2t > budget):
                 raise EStop(f"over_current_i2t:{np.round(i2t, 1).tolist()}>{budget}")
-            pose = forward(q_p, config.geo)
             if t >= _GUARD_GRACE_S:
-                err_mm = float(np.linalg.norm(forward(q_p_target, config.geo) - pose)) * 1e3
-                guard.push(t, pose * 1e3, cur, [args.current] * 2, err_mm)
-                tripped = guard.check()
-                if tripped is not None:
-                    raise EStop(f"osc_guard:{tripped}")
                 buzzing = buzz.step(t, q_p)
                 if buzzing is not None:
                     raise EStop(f"osc_guard:{buzzing}")
-            fault = monitor.check(q_cmd=q_y_cmd, q_meas=q_y[:2], qd_meas=qd_y[:2], tau_ext=tau_ext,
-                                  held_err=q_y[2:6] - follower.hold[2:6],
+            fault = monitor.check(q_cmd=q_y_cmd, q_meas=q_y[follower.idx], qd_meas=qd_y[follower.idx],
+                                  tau_ext=tau_ext,
+                                  held_err=q_y[follower.held] - follower.hold[follower.held],
                                   leader_age_s=link.feedback_age_s(), follower_age_s=y_age,
                                   tick_s=dt)
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
@@ -553,7 +561,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             if t >= next_print:
                 next_print = t + 0.5
                 print(f"  t={t:6.1f}s  panto={np.round(np.degrees(q_p), 1).tolist()}  "
-                      f"yam J1/J2={np.round(np.degrees(q_y[:2]), 1).tolist()}"
+                      f"yam {follower.names}={np.round(np.degrees(q_y[follower.idx]), 1).tolist()}"
                       f"{' BOX' if boxed.any() else ''}  tau_ext={np.round(tau_ext, 2).tolist()} N.m  "
                       f"reflect={np.round(tau_reflect * 1e3, 1).tolist()} mN.m  "
                       f"iq={np.round(cur, 2).tolist()} A")
