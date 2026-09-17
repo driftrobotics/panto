@@ -22,7 +22,7 @@ i2rt runs its gripper limit calibration at startup (the gripper opens/closes)
 unless --gripper-limits is given.
 
 E-stop (every path ends in the same ``_safe_stop``): Ctrl-C / SIGTERM, Enter / q / Esc
-(terminal is in cbreak mode once engaged; SPACE held = gripper close), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
+(terminal is in cbreak mode once engaged; SPACE held = gripper close, A/D or Left/Right\nheld = base-yaw jog at --jog-deg-s), ``--stop`` from another shell (SIGTERM via logs/teleop_yam.pid), any
 ``TeleopMonitor`` fault, a panto drive leaving CLOSED_LOOP, joint-limit
 violation, I²t trip, oscillation guard, or any exception. Safe stop = YAM ->
 gravity-comp idle (NOT zero torque: J2 carries the arm against gravity), panto
@@ -84,7 +84,9 @@ def _parse() -> argparse.Namespace:
                    help="YAM only: slow sine on J1/J2 about the hand-placed pose (breakaway / friction ID)")
     p.add_argument("--wiggle-deg", type=float, default=5.0)
     p.add_argument("--wiggle-hz", type=float, default=0.2)
-    p.add_argument("--no-grip-key", action="store_true", help="disable SPACE-held = gripper close")
+    p.add_argument("--no-grip-key", action="store_true",
+                   help="disable the teleop keys (SPACE held = gripper close, A/D or Left/Right held = base yaw jog)")
+    p.add_argument("--jog-deg-s", type=float, default=30.0, help="base-yaw jog rate while A/D or an arrow is held")
     p.add_argument("--no-reflect", action="store_true", help="position-position coupling only")
     p.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until e-stop")
     p.add_argument("--rate", type=float, default=250.0,
@@ -125,7 +127,9 @@ def _parse() -> argparse.Namespace:
     # reflection
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
                    help="panto N.m per YAM N.m of external torque")
-    p.add_argument("--cutoff-hz", type=float, default=8.0)
+    p.add_argument("--cutoff-hz", type=float, default=5.0,
+                   help="reflected-torque low-pass; 8 Hz let a contact-release limit cycle chatter panto's\n"
+                        "elbow at ~1 deg / 20 Hz (2026-09-17 23:24)")
     p.add_argument("--deadband-nm", type=_pair, default=np.array([2.3, 2.7]),
                    help="joint2,joint3: covers the free-motion friction envelope (2026-09-17 wiggle at 65/65 deg:\n"
                         "2.13 / 2.48 N.m about the bias)")
@@ -182,30 +186,56 @@ class _StopFlag:
         if self.reason is None:
             self.reason = reason
 
-    def space_held(self) -> bool:
+    _last_key: dict = {}
+    _repeating: dict = {}
+
+    def held(self, key: str) -> bool:
         """A terminal has no key-up event, only auto-repeat: the first repeat
         comes after the OS repeat delay (~0.25-0.66 s), later ones every ~30 ms.
-        So: held = a space within 0.7 s until repeats are seen, then within 0.15 s."""
-        timeout = 0.15 if self._space_repeating else 0.7
-        return time.monotonic() - self._space_last < timeout
+        So: held = the key within 0.7 s until repeats are seen, then within 0.15 s."""
+        timeout = 0.15 if self._repeating.get(key) else 0.7
+        return time.monotonic() - self._last_key.get(key, -1e9) < timeout
 
-    _space_last = -1e9
-    _space_repeating = False
+    def space_held(self) -> bool:
+        return self.held(" ")
+
+    def jog(self) -> float:
+        """-1 / 0 / +1 for A|Left / none / D|Right held."""
+        return float(self.held("right")) - float(self.held("left"))
+
+    def _press(self, key: str) -> None:
+        now = time.monotonic()
+        if now - self._last_key.get(key, -1e9) < 0.12:
+            self._repeating[key] = True
+        self._last_key[key] = now
 
     def _watch_stdin(self) -> None:
+        fd = sys.stdin.fileno()
         while self.reason is None:
             ready, _, _ = select.select([sys.stdin], [], [], 0.05)
             if not ready:
-                if not self.space_held():
-                    self._space_repeating = False
+                for key in list(self._repeating):
+                    if not self.held(key):
+                        self._repeating[key] = False
                 continue
-            ch = os.read(sys.stdin.fileno(), 1)
-            if ch == b" ":
-                now = time.monotonic()
-                if now - self._space_last < 0.12:
-                    self._space_repeating = True
-                self._space_last = now
-            elif ch in (b"\n", b"\r", b"q", b"\x1b"):
+            ch = os.read(fd, 1)
+            if ch == b"\x1b":                       # Esc alone = e-stop; Esc [ C/D = arrows
+                seq = b""
+                while len(seq) < 2 and select.select([sys.stdin], [], [], 0.05)[0]:
+                    seq += os.read(fd, 1)
+                if seq == b"[C":
+                    self._press("right")
+                elif seq == b"[D":
+                    self._press("left")
+                else:
+                    self.set("operator:key")
+            elif ch == b" ":
+                self._press(" ")
+            elif ch in (b"a", b"A"):
+                self._press("left")
+            elif ch in (b"d", b"D"):
+                self._press("right")
+            elif ch in (b"\n", b"\r", b"q", b"Q"):
                 self.set("operator:key")
 
 
@@ -261,6 +291,16 @@ class _Follower:
     def alive(self) -> bool:
         thread = getattr(self.robot, "_server_thread", None)
         return thread is None or thread.is_alive()
+
+    def jog_base(self, direction: float, dt: float, rate_rad_s: float) -> float:
+        """Slew the held base-yaw (joint index 0) target; stays 0.2 rad inside i2rt's limits."""
+        if 0 in self.idx or direction == 0.0:
+            return float(self.hold[0])
+        target = self.hold[0] + direction * rate_rad_s * max(dt, 0.0)
+        if self.joint_limits is not None:
+            target = float(np.clip(target, self.joint_limits[0, 0] + 0.2, self.joint_limits[0, 1] - 0.2))
+        self.hold[0] = target
+        return target
 
     def set_grip(self, close: bool, dt: float, rate_per_s: float = 2.5) -> float:
         """Normalised gripper target, 0 = closed .. 1 = open, slewed (full stroke in
@@ -599,6 +639,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             q_y_cmd = limiter.step(q_y_target, dt)
             grip_close = (not args.no_grip_key) and stop.space_held()
             grip = follower.set_grip(grip_close, dt) if not args.no_grip_key else follower.grip
+            jog = 0.0 if args.no_grip_key else stop.jog()
+            base = follower.jog_base(jog, dt, np.radians(args.jog_deg_s))
             follower.command(q_y_cmd)
 
             # leader: spring to the mapped-back measured follower + reflected torque
@@ -628,7 +670,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
-                       grip_close=grip_close, grip_cmd=grip, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
+                       grip_close=grip_close, grip_cmd=grip, jog=jog, base_cmd=base, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
                        panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if fault is not None:
                 raise EStop(f"monitor:{fault}")

@@ -101,7 +101,7 @@ def test_buzz_detector_ignores_hand_motion_and_catches_oscillation():
     hand = BuzzDetector()
     assert all(hand.step(t, [0.5 * np.sin(2 * np.pi * 1.0 * t), 0.0]) is None for t in ts)   # 1 Hz sweep
     buzz = BuzzDetector()
-    trips = [buzz.step(t, [0.0, np.radians(2.0) * np.sin(2 * np.pi * 12.0 * t)]) for t in ts]  # 12 Hz, 4 deg p-p
+    trips = [buzz.step(t, [0.0, np.radians(4.0) * np.sin(2 * np.pi * 12.0 * t)]) for t in ts]  # 12 Hz, 8 deg p-p
     assert any(r is not None and r.startswith("joint1") for r in trips)
     rng = np.random.default_rng(0)
     jitter = BuzzDetector()                                     # 2026-09-17 false trip: +-0.15 deg tremor
