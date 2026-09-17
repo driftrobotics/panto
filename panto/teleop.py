@@ -102,23 +102,33 @@ class EffortReflector:
 class BuzzDetector:
     """Leader oscillation detector that tolerates deliberate hand motion (the
     pose-std OscillationGuard does not: a moving leader *is* pose variance).
-    Trips when any joint's velocity reverses sign >= ``flips`` times within
-    ``window_s`` with each swing faster than ``min_vel_rad_s`` -- i.e. a
-    sustained oscillation of >= flips/(2*window) Hz, not a hand changing direction."""
+    Works on joint *position* with hysteresis -- the drives' velocity estimate
+    is too noisy (+-0.4 rad/s of jitter on a hand-held, 0.1 deg-still arm). A
+    reversal counts only after the joint has swung >= ``min_swing_rad`` from
+    its last turning point; ``flips`` of them within ``window_s`` trips, i.e.
+    a sustained >= flips/(2*window) Hz oscillation of real amplitude."""
 
-    def __init__(self, window_s: float = 0.5, flips: int = 6, min_vel_rad_s: float = 0.3) -> None:
-        self._window, self._flips, self._min = float(window_s), int(flips), float(min_vel_rad_s)
-        self._last_sign = np.zeros(2)
+    def __init__(self, window_s: float = 0.5, flips: int = 6, min_swing_rad: float = np.radians(0.75)) -> None:
+        self._window, self._flips, self._swing = float(window_s), int(flips), float(min_swing_rad)
+        self._extreme: np.ndarray | None = None
+        self._dir = np.zeros(2)
         self._events: list[list[float]] = [[], []]
 
-    def step(self, t: float, qd) -> str | None:
-        for j, v in enumerate(np.asarray(qd, float)):
-            if abs(v) < self._min:
-                continue
-            sign = np.sign(v)
-            if self._last_sign[j] != 0 and sign != self._last_sign[j]:
+    def step(self, t: float, q) -> str | None:
+        q = np.asarray(q, float)
+        if self._extreme is None:
+            self._extreme = q.copy()
+            return None
+        for j in range(2):
+            delta = q[j] - self._extreme[j]
+            if self._dir[j] == 0:
+                if abs(delta) >= self._swing:
+                    self._dir[j], self._extreme[j] = np.sign(delta), q[j]
+            elif delta * self._dir[j] > 0:
+                self._extreme[j] = q[j]                       # still travelling: move the turning point
+            elif abs(delta) >= self._swing:
+                self._dir[j], self._extreme[j] = -self._dir[j], q[j]
                 self._events[j].append(t)
-            self._last_sign[j] = sign
             self._events[j] = [e for e in self._events[j] if e >= t - self._window]
             if len(self._events[j]) >= self._flips:
                 return f"joint{j}:{len(self._events[j])}_reversals_in_{self._window}s"

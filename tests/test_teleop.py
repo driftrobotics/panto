@@ -99,9 +99,10 @@ def test_monitor_faults_and_latches(over, name):
 def test_buzz_detector_ignores_hand_motion_and_catches_oscillation():
     ts = np.arange(0, 2.0, 0.005)
     hand = BuzzDetector()
-    assert all(hand.step(t, [2.0 * np.sin(2 * np.pi * 1.0 * t), 0.0]) is None for t in ts)   # 1 Hz sweep
+    assert all(hand.step(t, [0.5 * np.sin(2 * np.pi * 1.0 * t), 0.0]) is None for t in ts)   # 1 Hz sweep
     buzz = BuzzDetector()
-    trips = [buzz.step(t, [0.0, 1.0 * np.sin(2 * np.pi * 12.0 * t)]) for t in ts]           # 12 Hz
+    trips = [buzz.step(t, [0.0, np.radians(2.0) * np.sin(2 * np.pi * 12.0 * t)]) for t in ts]  # 12 Hz, 4 deg p-p
     assert any(r is not None and r.startswith("joint1") for r in trips)
-    quiet = BuzzDetector()
-    assert all(quiet.step(t, [0.05 * np.sin(2 * np.pi * 30.0 * t), 0.0]) is None for t in ts)  # below min_vel
+    rng = np.random.default_rng(0)
+    jitter = BuzzDetector()                                     # 2026-09-17 false trip: +-0.15 deg tremor
+    assert all(jitter.step(t, np.radians(rng.uniform(-0.15, 0.15, 2))) is None for t in ts)
