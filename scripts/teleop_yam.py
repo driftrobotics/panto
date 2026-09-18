@@ -57,7 +57,7 @@ from panto.limits import JointLimitViolation, check_armable, clamp_targets, q_de
 from panto.telemetry import LOG_ROOT, RunLogger
 from panto.teleop import BuzzDetector, EffortReflector, JointMap, RateLimiter, TeleopLimits, TeleopMonitor
 
-PID_FILE = LOG_ROOT / "teleop_yam.pid"
+PID_FILE = Path(os.environ.get("TELEOP_PID_FILE", LOG_ROOT / "teleop_yam.pid"))  # override for sim tests beside a live run
 _VEL_GAIN_MAX = 0.05     # same ceilings as Runtime.set_tuning
 _CURRENT_CAP_MAX = 2.0
 _GUARD_GRACE_S = 1.0
@@ -278,23 +278,39 @@ class _Follower:
         self.hold = np.asarray(self.robot.get_joint_pos(), float).copy()
         kp = np.asarray(getattr(self.robot, "_kp", np.zeros(self.n)), float).copy()
         kd = np.asarray(getattr(self.robot, "_kd", np.zeros(self.n)), float).copy()
-        self.idx = list(args.yam_joints)
-        if len(self.idx) != 2 or len(set(self.idx)) != 2 or not all(0 <= i < 6 for i in self.idx):
-            raise SystemExit("--yam-joints needs two distinct arm joints in 0..5")
-        self.held = [i for i in range(6) if i not in self.idx]
-        self.names = "/".join(f"joint{i + 1}" for i in self.idx)
-        lead = np.radians(args.lead_max_deg)
-        kp_lead = np.minimum(np.asarray(args.yam_tau_max, float) / lead, np.asarray(args.yam_kp, float))
-        self.tau_max = kp_lead * lead                       # what the drives actually render at lead-max
-        kp[self.idx], kd[self.idx] = kp_lead, args.yam_kd
         self.has_gripper = self.n > 6
-        self._grip_gains = (kp[6:].copy(), kd[6:].copy())
-        kp[6:], kd[6:] = 0.0, 0.0   # gripper limp until a grip command arrives (set_grip)
-        self.grip = float(self.hold[6]) if self.has_gripper else 0.0
+        self._default_kp, self._default_kd = kp.copy(), kd.copy()   # i2rt's per-joint gains (gripper incl.)
+        self._args = args
         self._kp, self._kd = kp, kd
+        self.grip = float(self.hold[6]) if self.has_gripper else 0.0
+        self.idx: list[int] = []
+        self.set_joints(list(args.yam_joints))
         info = self.robot.get_robot_info() if hasattr(self.robot, "get_robot_info") else {}
         self.joint_limits = np.asarray(info.get("joint_limits"), float) if info.get("joint_limits") is not None \
             else None
+
+    def set_joints(self, idx: list[int]) -> None:
+        """Choose the two follower joints (0..5 arm, 6 = gripper). Former mapped joints go
+        back to i2rt's hold gains at their current position; new ones get the lead-derived
+        kp (capped at --yam-kp for arm joints, at i2rt's own default for the gripper)."""
+        if len(idx) != 2 or len(set(idx)) != 2 or not all(0 <= i < self.n for i in idx):
+            raise ValueError(f"need two distinct joints in 0..{self.n - 1}, got {idx}")
+        args = self._args
+        self.hold = np.asarray(self.robot.get_joint_pos(), float).copy()
+        kp, kd = self._default_kp.copy(), self._default_kd.copy()
+        if self.has_gripper and 6 not in idx:
+            kp[6:], kd[6:] = 0.0, 0.0       # gripper limp until a grip command (set_grip)
+        lead = np.radians(args.lead_max_deg)
+        kp_cap = np.array([float(args.yam_kp[k]) if i < 6 else float(self._default_kp[i]) for k, i in enumerate(idx)])
+        kp_lead = np.minimum(np.asarray(args.yam_tau_max, float) / lead, kp_cap)
+        self.tau_max = kp_lead * lead
+        kp[idx] = kp_lead
+        kd[idx] = [float(args.yam_kd[k]) if i < 6 else float(self._default_kd[i]) for k, i in enumerate(idx)]
+        self._grip_gains = (self._default_kp[6:].copy(), self._default_kd[6:].copy())
+        self.idx = list(idx)
+        self.held = [i for i in range(6) if i not in self.idx]
+        self.names = "/".join("gripper" if i == 6 else f"joint{i + 1}" for i in self.idx)
+        self._kp, self._kd = kp, kd
 
     def read(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         """-> (q[n], qd[n], tau_ext[n], age_s). tau_ext = reported effort minus the
@@ -327,8 +343,8 @@ class _Follower:
     def set_grip(self, close: bool, dt: float, rate_per_s: float = 2.5) -> float:
         """Normalised gripper target, 0 = closed .. 1 = open, slewed (full stroke in
         0.4 s). i2rt's own gripper force limiter (50 N) stays in charge of squeeze."""
-        if not self.has_gripper:
-            return 0.0
+        if not self.has_gripper or 6 in self.idx:
+            return self.grip
         self._kp[6:], self._kd[6:] = self._grip_gains
         step = rate_per_s * max(dt, 0.0)
         self.grip = float(np.clip(self.grip + np.clip((0.0 if close else 1.0) - self.grip, -step, step), 0.0, 1.0))
@@ -595,45 +611,85 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             except Exception as exc:  # noqa: BLE001 -- the page is a convenience, never a reason not to run
                 web = None
                 log.event(f"/teleop page unavailable ({exc!r}); terminal keys only", level="WARN")
-        if web is not None and args.nudge_m_s > 0:
+        _KNOWN = {1: (-0.7, 2.3), 2: (0.95, 2.7), 6: (0.0, 0.3)}   # (bias, deadband) per YAM joint, 2026-09-17 IDs
+
+        class _Map:
+            """Everything that depends on which two YAM joints panto drives; rebuilt on remap."""
+
+        def build_mapping(joints, scale, q_p_now, *, settle_s: float) -> "_Map":
+            M = _Map()
+            follower.set_joints(list(joints))
+            M.scale = np.asarray(scale, float)
+            q_now, _, _, _ = follower.read()
+            q_y0 = q_now[follower.idx].copy()
+            if args.yam_box_deg and list(joints) == list(args.yam_joints):
+                bx = np.radians([float(x) for x in args.yam_box_deg.split(",")])
+                box_lo, box_hi = bx[[0, 2]], bx[[1, 3]]
+            else:
+                half = np.radians(args.yam_range_deg)
+                box_lo, box_hi = q_y0 - half, q_y0 + half
+            if args.no_box:
+                box_lo, box_hi = np.full(2, -np.inf), np.full(2, np.inf)
+            elif list(joints) == list(args.yam_joints):
+                ab = np.radians([float(x) for x in args.yam_abs_box_deg.split(",")])
+                box_lo, box_hi = np.maximum(box_lo, ab[[0, 2]]), np.minimum(box_hi, ab[[1, 3]])
+            for k, j in enumerate(follower.idx):
+                if j == 6:                                   # gripper: normalised stroke 0..1
+                    box_lo[k], box_hi[k] = 0.02, 0.98
+                elif follower.joint_limits is not None:
+                    box_lo[k] = max(box_lo[k], follower.joint_limits[j, 0] + 0.2)
+                    box_hi[k] = min(box_hi[k], follower.joint_limits[j, 1] - 0.2)
+                elif args.no_box:
+                    raise EStop("--no-box needs i2rt joint limits and none were reported")
             try:
-                import mujoco
-                from panto.teleop_cart import PlanarOffset
-                model = getattr(follower.robot, "_model", None)
-                if model is None:
-                    model = mujoco.MjModel.from_xml_path(follower.robot.xml_path)
-                cart = PlanarOffset(model, tuple(follower.idx), speed_m_s=args.nudge_m_s)
-                log.event(f"EE nudge on arrows: {args.nudge_m_s * 100:.0f} cm/s radial/z via joints {follower.names}")
-            except Exception as exc:  # noqa: BLE001
-                cart = None
-                log.event(f"EE nudge unavailable ({exc!r})", level="WARN")
-        q_y, _, _, _ = follower.read()
-        q_y0 = q_y[follower.idx].copy()
-        if args.yam_box_deg:
-            b = np.radians([float(x) for x in args.yam_box_deg.split(",")])
-            box_lo, box_hi = b[[0, 2]], b[[1, 3]]
-        else:
-            half = np.radians(args.yam_range_deg)
-            box_lo, box_hi = q_y0 - half, q_y0 + half
-        if args.no_box:
-            box_lo, box_hi = np.full(2, -np.inf), np.full(2, np.inf)
-        else:
-            ab = np.radians([float(x) for x in args.yam_abs_box_deg.split(",")])
-            box_lo, box_hi = np.maximum(box_lo, ab[[0, 2]]), np.minimum(box_hi, ab[[1, 3]])
-        if follower.joint_limits is not None:
-            box_lo = np.maximum(box_lo, follower.joint_limits[follower.idx, 0] + 0.2)
-            box_hi = np.minimum(box_hi, follower.joint_limits[follower.idx, 1] - 0.2)
-        elif args.no_box:
-            raise EStop("--no-box needs i2rt joint limits and none were reported")
-        try:
-            jmap = JointMap(scale=args.scale, leader_zero=q_p0, follower_zero=q_y0,
-                            follower_lo=box_lo, follower_hi=box_hi)
-        except ValueError as exc:
-            raise EStop(f"refusing to engage: {exc} (yam {np.round(np.degrees(q_y0), 1).tolist()} deg, box "
-                        f"{np.round(np.degrees([box_lo, box_hi]), 1).tolist()})")
-        limiter = RateLimiter(np.radians(args.yam_rate_deg_s), q_y0)
-        reflector = EffortReflector(args.alpha, args.scale, cutoff_hz=args.cutoff_hz,
-                                    deadband_nm=args.deadband_nm, tau_max_nm=tau_max)
+                M.jmap = JointMap(scale=M.scale, leader_zero=q_p_now, follower_zero=q_y0,
+                                  follower_lo=box_lo, follower_hi=box_hi)
+            except ValueError as exc:
+                raise EStop(f"refusing to engage: {exc} (yam {np.round(np.degrees(q_y0), 1).tolist()} deg, box "
+                            f"{np.round(np.degrees([box_lo, box_hi]), 1).tolist()})")
+            M.q_y0 = q_y0
+            M.limiter = RateLimiter(np.radians(args.yam_rate_deg_s), q_y0)
+            if list(joints) == list(args.yam_joints):
+                bias, dead = np.asarray(args.yam_bias_nm, float), np.asarray(args.deadband_nm, float)
+            else:
+                bias = np.array([_KNOWN.get(j, (0.0, 1.0))[0] for j in follower.idx])
+                dead = np.array([_KNOWN.get(j, (0.0, 1.0))[1] for j in follower.idx])
+            M.bias = bias
+            M.reflector = EffortReflector(args.alpha, M.scale, cutoff_hz=args.cutoff_hz,
+                                          deadband_nm=dead, tau_max_nm=tau_max)
+            M.cart = None
+            if web is not None and args.nudge_m_s > 0 and all(j < 6 for j in follower.idx):
+                try:
+                    import mujoco
+                    from panto.teleop_cart import PlanarOffset
+                    model = getattr(follower.robot, "_model", None)
+                    if model is None:
+                        model = mujoco.MjModel.from_xml_path(follower.robot.xml_path)
+                    M.cart = PlanarOffset(model, tuple(follower.idx), speed_m_s=args.nudge_m_s)
+                except Exception as exc:  # noqa: BLE001
+                    log.event(f"EE nudge unavailable ({exc!r})", level="WARN")
+            # Baseline: tau_ext while stationary is model error, not contact.
+            samples = []
+            for _ in range(int(settle_s * args.rate)):
+                samples.append(follower.read()[2][follower.idx])
+                time.sleep(1.0 / args.rate)
+            M.tau_bias = np.mean(samples, axis=0)
+            # Leader spring: saturates (current cap) at the same lead the follower saturates at.
+            M.lead_y = np.radians(args.lead_max_deg)
+            M.lead_p = M.lead_y / np.abs(M.scale)                                # lead-max in panto rad
+            M.k_lead = np.array([args.current * float(m.torque_constant) for m in config.motors]) / M.lead_p
+            M.pos_gains = [PositionBackend._pos_gain(m, float(M.k_lead[i])) for i, m in enumerate(config.motors)]
+            log.event(f"engage {follower.names} x{M.scale.tolist()}: panto q_deg={q_deg(q_p_now)}  "
+                      f"yam={np.round(q_y0, 3).tolist()}  box={np.round(np.degrees([box_lo, box_hi]), 1).tolist()} deg  "
+                      f"tau_ext baseline {np.round(M.tau_bias, 3).tolist()} N.m  follower kp "
+                      f"{np.round(follower._kp[follower.idx], 1).tolist()} (tau {np.round(follower.tau_max, 2).tolist()}), "
+                      f"leader k {np.round(M.k_lead, 3).tolist()} N.m/rad (tau {np.round(M.k_lead * M.lead_p * 1e3, 1).tolist()} "
+                      f"mN.m at {args.current} A)" + ("" if M.cart is None else f"; EE nudge {args.nudge_m_s * 100:.0f} cm/s"))
+            M.names = follower.names
+            M.joints = list(follower.idx)
+            return M
+
+        M = build_mapping(args.yam_joints, args.scale, q_p0, settle_s=0.5)
         max_err = args.max_err_deg if args.max_err_deg is not None else 2.5 * args.lead_max_deg
         monitor = TeleopMonitor(TeleopLimits(follower_err_rad=np.radians(max_err),
                                              follower_vel_rad_s=np.radians(args.max_vel_deg_s),
@@ -642,17 +698,6 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         # leader is pose variance, and a leader pushed ahead of a sticky follower sits at the
         # current cap by design (2026-09-17 false trips). BuzzDetector + I2t cover the real faults.
         buzz = BuzzDetector()
-        log.event(f"engage: panto q_deg={q_deg(q_p0)}  yam q_deg={np.round(np.degrees(q_y), 1).tolist()}  "
-                  f"box_deg={np.round(np.degrees([box_lo, box_hi]), 1).tolist()}")
-
-        # Baseline: tau_ext while stationary in grav-comp idle is model error, not contact.
-        samples = []
-        for _ in range(int(0.5 * args.rate)):
-            samples.append(follower.read()[2][follower.idx])
-            time.sleep(1.0 / args.rate)
-        tau_bias = np.mean(samples, axis=0)
-        log.event(f"tau_ext baseline {follower.names} = {np.round(tau_bias, 3).tolist()} N.m "
-                  f"(std {np.round(np.std(samples, axis=0), 3).tolist()})")
 
         backend.enter()
         for i, nid in enumerate(nodes):
@@ -665,17 +710,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
         armed = True
         for i, nid in enumerate(nodes):
             link.set_vel_gains(nid, float(config.motors[i].vel_gain), 0.0)
-        # Leader spring: saturates (current cap) at the same lead the follower saturates at.
-        lead_y = np.radians(args.lead_max_deg)
-        lead_p = lead_y / np.abs(args.scale)                                # lead-max in panto rad
-        k_lead = np.array([args.current * float(m.torque_constant) for m in config.motors]) / lead_p
-        pos_gains = [PositionBackend._pos_gain(m, float(k_lead[i])) for i, m in enumerate(config.motors)]
-        log.event(f"coupling: lead-max {args.lead_max_deg} deg -> follower kp "
-                  f"{np.round(follower._kp[follower.idx], 1).tolist()} (tau {np.round(follower.tau_max, 1).tolist()} N.m), "
-                  f"leader k {np.round(k_lead, 3).tolist()} N.m/rad "
-                  f"(tau {np.round(k_lead * lead_p * 1e3, 1).tolist()} mN.m at {args.current} A)")
         vel_limit = backend.vel_limit_rad_s
-        follower.command(q_y0)
+        follower.command(M.q_y0)
 
         period = 1.0 / args.rate
         t0 = last = time.monotonic()
@@ -687,6 +723,14 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             t, dt, last = now - t0, now - last, now
             if web is not None and web.stop_reason() is not None:
                 stop.set(web.stop_reason())
+            req = web.take_map() if web is not None and hasattr(web, "take_map") else None
+            if req is not None:
+                try:
+                    q_p_now, _ = link.joint_state()
+                    M = build_mapping(req["joints"], req["scale"], q_p_now, settle_s=0.2)
+                except (EStop, ValueError) as exc:
+                    log.event(f"remap refused: {exc}", level="WARN")
+                last = time.monotonic()      # the baseline sample paused the loop; don't count it as a tick
             if stop.reason is not None:
                 raise EStop(stop.reason)
             if args.duration and t >= args.duration:
@@ -699,8 +743,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
 
             q_p, qd_p = link.joint_state()
             q_y, qd_y, tau_ext_all, y_age = follower.read()
-            tau_raw = tau_ext_all[follower.idx] - tau_bias
-            tau_ext = tau_raw - args.yam_bias_nm - args.yam_friction_nm * np.tanh(qd_y[follower.idx] / 0.05)
+            tau_raw = tau_ext_all[follower.idx] - M.tau_bias
+            tau_ext = tau_raw - M.bias - args.yam_friction_nm * np.tanh(qd_y[follower.idx] / 0.05)
             if args.sim and args.sim_tau is not None:
                 tau_ext = tau_ext + args.sim_tau
 
@@ -712,34 +756,34 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             jog = 0.0 if args.no_grip_key else float(np.clip(stop.jog() + web_jog, -1.0, 1.0))
             base = follower.jog_base(jog, dt, np.radians(args.jog_deg_s))
             nudge = (0.0, 0.0)
-            if cart is not None and web is not None and not args.no_grip_key:
+            if M.cart is not None and web is not None and not args.no_grip_key:
                 nudge = (web.axis("left", "right"), web.axis("down", "up"))   # -> = out, ^ = up
-                cart.step(nudge, dt)
+                M.cart.step(nudge, dt)
 
             # follower: mapped, + EE offset (arrow keys) folded into the two joints, boxed, slew-limited
-            q_y_target, boxed = jmap.to_follower(q_p)
+            q_y_target, boxed = M.jmap.to_follower(q_p)
             dq_off = np.zeros(2)
-            if cart is not None:
+            if M.cart is not None:
                 if web is not None and web.held("c"):
-                    cart.clear()
-                nudged = np.clip(cart.solve(q_y, q_y_target), jmap.follower_lo, jmap.follower_hi)
+                    M.cart.clear()
+                nudged = np.clip(M.cart.solve(q_y, q_y_target), M.jmap.follower_lo, M.jmap.follower_hi)
                 # what the nudge actually changed in the (boxed) command -- the leader is
                 # offset by exactly this, so panto and YAM can never disagree about "in sync"
                 dq_off = nudged - q_y_target
                 q_y_target = nudged
-            q_y_cmd = limiter.step(q_y_target, dt)
+            q_y_cmd = M.limiter.step(q_y_target, dt)
             q_meas = q_y[follower.idx]
-            q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
+            q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -M.lead_y, M.lead_y)   # PD torque <= kp x lead-max
             follower.command(q_y_cmd)
 
             # leader: spring to the mapped-back measured follower (less the EE offset) + reflected torque
-            q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx] - dq_off), config.motors)
-            tau_reflect = reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
+            q_p_target = clamp_targets(M.jmap.to_leader(q_y[follower.idx] - dq_off), config.motors)
+            tau_reflect = M.reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
             tau_ff = []
             for i, motor in enumerate(config.motors):
                 ff = float(tau_reflect[i]) + PositionBackend._hold_ff(motor, q_p) + _limit_wall(motor, float(q_p[i]))
                 link.set_input_pos(motor.node_id, float(q_p_target[i]), torque_ff_nm=ff)
-                link.set_pos_gain(motor.node_id, pos_gains[i])
+                link.set_pos_gain(motor.node_id, M.pos_gains[i])
                 link.set_limits(motor.node_id, vel_limit, args.current)
                 tau_ff.append(ff)
 
@@ -760,7 +804,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
                        grip_close=grip_close, grip_cmd=grip, jog=jog, base_cmd=base,
-                       nudge=nudge, ee_offset=cart.offset if cart is not None else None, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
+                       nudge=nudge, ee_offset=M.cart.offset if M.cart is not None else None, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
                        panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if web is not None:
                 web.publish({"t": round(t, 2), "panto_deg": np.degrees(q_p).round(1).tolist(),
@@ -769,8 +813,9 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                              "boxed": boxed.tolist(), "yam_tau_ext_nm": tau_ext.round(2).tolist(),
                              "panto_iq_a": np.round(cur, 2).tolist(), "base_deg": round(float(np.degrees(base)), 1),
                              "grip": round(grip, 2), "grip_close": grip_close, "jog": jog,
-                             "ee_offset_cm": (cart.offset * 100).round(1).tolist() if cart is not None else [0, 0],
-                             "nudge_rejected": cart.rejected if cart is not None else 0,
+                             "ee_offset_cm": (M.cart.offset * 100).round(1).tolist() if M.cart is not None else [0, 0],
+                             "nudge_rejected": M.cart.rejected if M.cart is not None else 0,
+                             "map": {"joints": M.joints, "scale": M.scale.tolist(), "names": M.names.split("/")},
                              "fault": fault or ""})
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
