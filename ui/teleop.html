@@ -43,6 +43,18 @@
   #cams figure { margin:0; }
   #cams video { width:400px; max-width:45vw; background:#000; border:1px solid var(--border,#333); border-radius:4px; }
   #cams figcaption { font-size:11px; color:var(--muted); }
+  .row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+  .row label { flex:1; color:var(--muted); font-size:12px; }
+  .row select, .row input { background:#0d0f14; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:4px 6px; }
+  .row input[type=number] { width:70px; }
+  #map-apply {
+    display:block; width:100%; padding:10px; margin-top:8px;
+    background:var(--dot); color:#fff; border:none; border-radius:6px;
+    font-size:13px; font-weight:600; cursor:pointer;
+  }
+  #map-current { font-size:12px; color:var(--muted); margin-top:8px; }
+  #map-note { color:var(--muted); font-size:11px; text-align:center; margin:6px 0 0; }
+  #map-error { color:var(--bad); font-size:11px; text-align:center; min-height:14px; }
 </style>
 </head>
 <body>
@@ -66,6 +78,30 @@
     <div class="key" id="k-c">C ⌂</div>
   </div>
   <button id="estop">E-STOP</button>
+</div>
+
+<div class="panel">
+  <h1>Mapping</h1>
+  <div class="row">
+    <label for="map-j0">panto j0 →</label>
+    <select id="map-j0"></select>
+  </div>
+  <div class="row">
+    <label for="map-s0">scale j0</label>
+    <input id="map-s0" type="number" step="0.1" value="1">
+  </div>
+  <div class="row">
+    <label for="map-j1">panto j1 →</label>
+    <select id="map-j1"></select>
+  </div>
+  <div class="row">
+    <label for="map-s1">scale j1</label>
+    <input id="map-s1" type="number" step="0.1" value="1">
+  </div>
+  <button id="map-apply">Apply (re-engage)</button>
+  <div id="map-note">Applying re-zeroes both arms at their current poses</div>
+  <div id="map-current"></div>
+  <div id="map-error"></div>
 </div>
 
 <div class="panel">
@@ -104,7 +140,12 @@ function releaseAll() {
   send({ type: 'blur' });
 }
 
+function isFormField(el) {
+  return el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA');
+}
+
 document.addEventListener('keydown', e => {
+  if (isFormField(e.target)) return;
   if (e.key === 'Escape') {
     send({ type: 'estop' });
     e.preventDefault();
@@ -117,6 +158,7 @@ document.addEventListener('keydown', e => {
   sendKey(key, true);
 });
 document.addEventListener('keyup', e => {
+  if (isFormField(e.target)) return;
   const key = KEY_MAP[e.key];
   if (!key) return;
   e.preventDefault();
@@ -126,6 +168,64 @@ window.addEventListener('blur', releaseAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 
 document.getElementById('estop').addEventListener('click', () => send({ type: 'estop' }));
+
+/* ------------------------------------------------------------------ mapping panel */
+const JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'gripper'];
+const selJ0 = document.getElementById('map-j0');
+const selJ1 = document.getElementById('map-j1');
+const inS0 = document.getElementById('map-s0');
+const inS1 = document.getElementById('map-s1');
+const mapCurrentEl = document.getElementById('map-current');
+const mapErrorEl = document.getElementById('map-error');
+
+for (const [i, name] of JOINT_NAMES.entries()) {
+  const o0 = document.createElement('option'); o0.value = i; o0.textContent = name; selJ0.appendChild(o0);
+  const o1 = document.createElement('option'); o1.value = i; o1.textContent = name; selJ1.appendChild(o1);
+}
+selJ0.value = 1; // joint2
+selJ1.value = 2; // joint3
+
+let mapDirty = false;
+function markDirty() { mapDirty = true; }
+[selJ0, selJ1, inS0, inS1].forEach(el => el.addEventListener('input', markDirty));
+// Don't let a focused select/number input eat the teleop keys.
+[selJ0, selJ1].forEach(el => el.addEventListener('change', () => el.blur()));
+
+function blurMapInputs() {
+  [selJ0, selJ1, inS0, inS1].forEach(el => el.blur());
+}
+
+function applyMap() {
+  const joints = [parseInt(selJ0.value, 10), parseInt(selJ1.value, 10)];
+  const scale = [parseFloat(inS0.value), parseFloat(inS1.value)];
+  send({ type: 'map', joints, scale });
+  mapDirty = false;
+  blurMapInputs();
+}
+document.getElementById('map-apply').addEventListener('click', applyMap);
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') blurMapInputs();
+}, true);
+
+let mapErrorTimer = null;
+function showMapError(message) {
+  mapErrorEl.textContent = message;
+  if (mapErrorTimer) clearTimeout(mapErrorTimer);
+  mapErrorTimer = setTimeout(() => { mapErrorEl.textContent = ''; }, 4000);
+}
+
+function renderMap(map) {
+  if (!map) return;
+  const names = map.names || map.joints.map(i => JOINT_NAMES[i] || String(i));
+  mapCurrentEl.textContent =
+    `j0 → ${names[0]} ×${map.scale[0]}, j1 → ${names[1]} ×${map.scale[1]}`;
+  if (mapDirty) return;
+  selJ0.value = map.joints[0];
+  selJ1.value = map.joints[1];
+  inS0.value = map.scale[0];
+  inS1.value = map.scale[1];
+}
 
 /* ------------------------------------------------------------------ state table */
 function round3sf(x) {
@@ -169,7 +269,12 @@ function connect() {
   ws.onerror = () => { ws.close(); };
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
-    if (m.type === 'state') renderState(m);
+    if (m.type === 'state') {
+      renderState(m);
+      if (m.map) renderMap(m.map);
+    } else if (m.type === 'error') {
+      showMapError(m.message);
+    }
   };
 }
 connect();
