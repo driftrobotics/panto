@@ -444,3 +444,16 @@ Space, A/D, ArrowLeft/ArrowRight (preventDefault; ignore auto-repeat via `event.
 releases everything on `blur`/`visibilitychange`, has a large red E-STOP button (also Esc),
 and renders the `state` fields as a compact table: whatever keys arrive (values may be
 numbers, lists of numbers, strings, bools). Show connection status.
+
+### Addendum 2026-09-18: live joint-mapping panel
+
+Keys now: `space, left, right, up, down, a, d, c` (unchanged ownership). New client -> server
+message: `{"type":"map","joints":[i0,i1],"scale":[s0,s1]}` where `i*` are ZERO-indexed YAM
+joints 0..5 or 6 = gripper, distinct, and `s*` are non-zero floats (YAM units per panto rad;
+for the gripper: normalised 0..1 stroke per rad). `TeleopWeb` gains
+`take_map() -> dict | None` (returns and clears the most recent valid request; invalid ones are
+dropped and answered with `{"type":"error","message":...}`) and the `state` broadcast may
+carry `"map": {"joints":[...], "scale":[...], "names":[...]}` which the page renders in a
+"Mapping" panel with two selects (joint1..joint6, gripper), two scale inputs (default from the
+current state's map) and an "Apply (re-engage)" button. Applying re-zeroes the correspondence
+at both robots' current poses (the script does that; the page just sends the message).
