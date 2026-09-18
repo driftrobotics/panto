@@ -51,7 +51,7 @@ def test_held_and_jog_follow_key_messages(server):
             await ws.send_json({"type": "key", "key": "right", "down": True})
             await asyncio.sleep(0.05)
             assert server.held("right") is True
-            assert server.jog() == 1.0
+            assert server.axis("left", "right") == 1.0 and server.jog() == 0.0
 
             await ws.send_json({"type": "key", "key": "right", "down": False})
             await asyncio.sleep(0.05)
@@ -159,4 +159,23 @@ def test_teleop_route_serves_html(server):
                 assert "<html" in body.lower()
                 assert "E-STOP" in body or "estop" in body.lower()
 
+    asyncio.run(run())
+
+
+def test_jog_is_a_d_and_arrows_are_axes(server):
+    async def run():
+        session, ws = await _connect(server)
+        try:
+            if True:
+                await ws.send_json({"type": "key", "key": "a", "down": True})
+                await ws.send_json({"type": "key", "key": "up", "down": True})
+                await asyncio.sleep(0.05)
+                assert server.jog() == 1.0                      # A = +yaw
+                assert server.axis("down", "up") == 1.0
+                assert server.axis("left", "right") == 0.0
+                await ws.send_json({"type": "key", "key": "d", "down": True})
+                await asyncio.sleep(0.05)
+                assert server.jog() == 0.0                      # both held -> 0
+        finally:
+            await _close(session, ws)
     asyncio.run(run())

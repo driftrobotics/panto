@@ -88,7 +88,10 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--wiggle-hz", type=float, default=0.2)
     p.add_argument("--no-grip-key", action="store_true",
                    help="disable the teleop keys (SPACE held = gripper close, A/D or Left/Right held = base yaw jog)")
-    p.add_argument("--jog-deg-s", type=float, default=30.0, help="base-yaw jog rate while A/D or an arrow is held")
+    p.add_argument("--jog-deg-s", type=float, default=30.0, help="base-yaw jog rate while A/D is held")
+    p.add_argument("--nudge-m-s", type=float, default=0.05,
+                   help="/teleop arrows: EE nudge speed, m/s (Left/Right = radial in/out, Up/Down = z), folded\n"
+                        "into the two mapped joints by IK on the YAM model; 0 disables")
     p.add_argument("--web", type=int, default=8081, metavar="PORT",
                    help="serve the /teleop key page (real keydown/keyup -- no auto-repeat lag) + live state on this "
                         "port; 0 disables. Terminal keys keep working alongside it")
@@ -543,6 +546,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
     backend = PositionBackend(link, config)
     follower: _Follower | None = None
     web = None
+    cart = None
     armed = False
 
     def _safe_stop(reason: str) -> None:
@@ -591,6 +595,18 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             except Exception as exc:  # noqa: BLE001 -- the page is a convenience, never a reason not to run
                 web = None
                 log.event(f"/teleop page unavailable ({exc!r}); terminal keys only", level="WARN")
+        if web is not None and args.nudge_m_s > 0:
+            try:
+                import mujoco
+                from panto.teleop_cart import PlanarOffset
+                model = getattr(follower.robot, "_model", None)
+                if model is None:
+                    model = mujoco.MjModel.from_xml_path(follower.robot.xml_path)
+                cart = PlanarOffset(model, tuple(follower.idx), speed_m_s=args.nudge_m_s)
+                log.event(f"EE nudge on arrows: {args.nudge_m_s * 100:.0f} cm/s radial/z via joints {follower.names}")
+            except Exception as exc:  # noqa: BLE001
+                cart = None
+                log.event(f"EE nudge unavailable ({exc!r})", level="WARN")
         q_y, _, _, _ = follower.read()
         q_y0 = q_y[follower.idx].copy()
         if args.yam_box_deg:
@@ -688,21 +704,30 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             if args.sim and args.sim_tau is not None:
                 tau_ext = tau_ext + args.sim_tau
 
-            # follower: mapped, boxed, slew-limited
-            q_y_target, boxed = jmap.to_follower(q_p)
-            q_y_cmd = limiter.step(q_y_target, dt)
-            q_meas = q_y[follower.idx]
-            q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
+            # keys: terminal (A/D or arrows = base jog) + web page (A/D = base jog, arrows = EE nudge)
             web_space = web is not None and web.held("space")
             web_jog = web.jog() if web is not None else 0.0
             grip_close = (not args.no_grip_key) and (stop.space_held() or web_space)
             grip = follower.set_grip(grip_close, dt) if not args.no_grip_key else follower.grip
-            jog = 0.0 if args.no_grip_key else float(np.clip(stop.jog() - web_jog, -1.0, 1.0))  # web: A/Left = +yaw too
+            jog = 0.0 if args.no_grip_key else float(np.clip(stop.jog() + web_jog, -1.0, 1.0))
             base = follower.jog_base(jog, dt, np.radians(args.jog_deg_s))
+            nudge = (0.0, 0.0)
+            if cart is not None and web is not None and not args.no_grip_key:
+                nudge = (web.axis("left", "right"), web.axis("down", "up"))   # -> = out, ^ = up
+                cart.step(nudge, dt)
+
+            # follower: mapped, + EE offset (arrow keys) folded into the two joints, boxed, slew-limited
+            q_y_target, boxed = jmap.to_follower(q_p)
+            if cart is not None:
+                q_y_target = np.clip(cart.solve(q_y, q_y_target), jmap.follower_lo, jmap.follower_hi)
+            q_y_cmd = limiter.step(q_y_target, dt)
+            q_meas = q_y[follower.idx]
+            q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
             follower.command(q_y_cmd)
 
-            # leader: spring to the mapped-back measured follower + reflected torque
-            q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx]), config.motors)
+            # leader: spring to the mapped-back measured follower (less the EE offset) + reflected torque
+            dq_off = cart.dq if cart is not None else 0.0
+            q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx] - dq_off), config.motors)
             tau_reflect = reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
             tau_ff = []
             for i, motor in enumerate(config.motors):
@@ -728,7 +753,8 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             log.sample(node_status=link.node_status(), t=t, dt=dt, panto_q=q_p, panto_qd=qd_p,
                        panto_q_target=q_p_target, panto_tau_ff=tau_ff, panto_iq=cur, i2t=i2t,
                        yam_q=q_y, yam_qd=qd_y, yam_q_cmd=q_y_cmd, yam_boxed=boxed,
-                       grip_close=grip_close, grip_cmd=grip, jog=jog, base_cmd=base, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
+                       grip_close=grip_close, grip_cmd=grip, jog=jog, base_cmd=base,
+                       nudge=nudge, ee_offset=cart.offset if cart is not None else None, yam_tau_ext=tau_ext, yam_tau_raw=tau_raw, yam_stamp=follower.stamp,
                        panto_stamps=link.feedback_stamps(), mono=now, tau_reflect=tau_reflect, yam_age_s=y_age, fault=fault)
             if web is not None:
                 web.publish({"t": round(t, 2), "panto_deg": np.degrees(q_p).round(1).tolist(),
@@ -737,6 +763,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                              "boxed": boxed.tolist(), "yam_tau_ext_nm": tau_ext.round(2).tolist(),
                              "panto_iq_a": np.round(cur, 2).tolist(), "base_deg": round(float(np.degrees(base)), 1),
                              "grip": round(grip, 2), "grip_close": grip_close, "jog": jog,
+                             "ee_offset_cm": (cart.offset * 100).round(1).tolist() if cart is not None else [0, 0],
                              "fault": fault or ""})
             if fault is not None:
                 raise EStop(f"monitor:{fault}")

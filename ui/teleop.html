@@ -46,11 +46,15 @@
 <div id="status" class="dead">connecting…</div>
 
 <div class="panel">
-  <div class="hint">Space = grip · A/D or ←/→ = jog · Esc = E-STOP</div>
+  <div class="hint">Space = grip · A/D = base rotate · ←/→ = EE in/out · ↑/↓ = EE z · Esc = E-STOP</div>
   <div id="keys">
-    <div class="key" id="k-left">◀ left</div>
+    <div class="key" id="k-a">A ↺</div>
+    <div class="key" id="k-d">D ↻</div>
     <div class="key" id="k-space">space</div>
-    <div class="key" id="k-right">right ▶</div>
+    <div class="key" id="k-left">◀ in</div>
+    <div class="key" id="k-right">out ▶</div>
+    <div class="key" id="k-up">▲ z+</div>
+    <div class="key" id="k-down">▼ z−</div>
   </div>
   <button id="estop">E-STOP</button>
 </div>
@@ -62,14 +66,14 @@
 <script>
 let ws = null;
 const statusEl = document.getElementById('status');
-const keyEls = { space: document.getElementById('k-space'), left: document.getElementById('k-left'), right: document.getElementById('k-right') };
+const keyEls = Object.fromEntries(['space','a','d','left','right','up','down'].map(k => [k, document.getElementById('k-' + k)]));
 
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 const KEY_MAP = {
   ' ': 'space', 'Spacebar': 'space',
-  'a': 'left', 'A': 'left', 'ArrowLeft': 'left',
-  'd': 'right', 'D': 'right', 'ArrowRight': 'right',
+  'a': 'a', 'A': 'a', 'd': 'd', 'D': 'd',
+  'ArrowLeft': 'left', 'ArrowRight': 'right', 'ArrowUp': 'up', 'ArrowDown': 'down',
 };
 
 function setKeyVisual(key, down) {
