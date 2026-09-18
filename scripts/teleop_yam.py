@@ -718,15 +718,21 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
 
             # follower: mapped, + EE offset (arrow keys) folded into the two joints, boxed, slew-limited
             q_y_target, boxed = jmap.to_follower(q_p)
+            dq_off = np.zeros(2)
             if cart is not None:
-                q_y_target = np.clip(cart.solve(q_y, q_y_target), jmap.follower_lo, jmap.follower_hi)
+                if web is not None and web.held("c"):
+                    cart.clear()
+                nudged = np.clip(cart.solve(q_y, q_y_target), jmap.follower_lo, jmap.follower_hi)
+                # what the nudge actually changed in the (boxed) command -- the leader is
+                # offset by exactly this, so panto and YAM can never disagree about "in sync"
+                dq_off = nudged - q_y_target
+                q_y_target = nudged
             q_y_cmd = limiter.step(q_y_target, dt)
             q_meas = q_y[follower.idx]
             q_y_cmd = q_meas + np.clip(q_y_cmd - q_meas, -lead_y, lead_y)   # PD torque <= kp x lead-max
             follower.command(q_y_cmd)
 
             # leader: spring to the mapped-back measured follower (less the EE offset) + reflected torque
-            dq_off = cart.dq if cart is not None else 0.0
             q_p_target = clamp_targets(jmap.to_leader(q_y[follower.idx] - dq_off), config.motors)
             tau_reflect = reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
             tau_ff = []
@@ -764,6 +770,7 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
                              "panto_iq_a": np.round(cur, 2).tolist(), "base_deg": round(float(np.degrees(base)), 1),
                              "grip": round(grip, 2), "grip_close": grip_close, "jog": jog,
                              "ee_offset_cm": (cart.offset * 100).round(1).tolist() if cart is not None else [0, 0],
+                             "nudge_rejected": cart.rejected if cart is not None else 0,
                              "fault": fault or ""})
             if fault is not None:
                 raise EStop(f"monitor:{fault}")
