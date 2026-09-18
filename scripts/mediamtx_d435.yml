@@ -1,6 +1,7 @@
-# Minimal mediamtx config for the D435 RTSP publisher.
-# Only RTSP is needed; disable the other protocols mediamtx enables by default
-# to keep this lightweight and avoid port clashes on a shared box.
+# Minimal mediamtx config for the D435 / D405 publishers (scripts/d435_rtsp.sh).
+# RTSP for tools (ffplay/vlc) + WebRTC (WHEP, port 8889) so the /teleop page can
+# embed the streams in a browser; everything else mediamtx enables by default is
+# off to keep this lightweight and avoid port clashes on a shared box.
 rtspAddress: :8554
 rtpAddress: :8000
 rtcpAddress: :8001
@@ -11,7 +12,9 @@ srtAddress: :8890
 api: no
 metrics: no
 pprof: no
-webrtc: no
+webrtc: yes
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: yes
 hls: no
 srt: no
 rtmp: no
@@ -22,4 +25,6 @@ logDestinations: [stdout]
 
 paths:
   d435:
+    source: publisher
+  d405:
     source: publisher
