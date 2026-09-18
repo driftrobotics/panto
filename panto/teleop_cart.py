@@ -15,6 +15,8 @@ from __future__ import annotations
 import numpy as np
 
 _R_MAX = 0.30      # m, |offset| clamp -- a nudge, not a second teleop channel
+_DQ_MAX = np.radians(45.0)   # a nudge never re-poses a joint by more than this
+_TOL = 0.005       # m, IK residual accepted as converged
 
 
 class PlanarOffset:
@@ -61,18 +63,23 @@ class PlanarOffset:
     # ---------------------------------------------------------------- per tick
 
     def step(self, axes: tuple[float, float], dt: float) -> np.ndarray:
-        """Integrate held arrow keys (radial, z in -1..1) into the offset."""
+        """Integrate held arrow keys (radial, z in -1..1) into the offset. The
+        previous (known-reachable) offset is kept so ``solve`` can back out."""
+        self._prev_offset = self.offset.copy()
         self.offset += self.speed * np.asarray(axes, float) * max(dt, 0.0)
         norm = float(np.linalg.norm(self.offset))
         if norm > _R_MAX:
             self.offset *= _R_MAX / norm
         return self.offset.copy()
 
+    _prev_offset = None
+    rejected = 0        # ticks whose nudge step was backed out (unreachable / diverging)
+
     def clear(self) -> None:
         self.offset[:] = 0.0
         self.dq[:] = 0.0
 
-    def solve(self, q_full: np.ndarray, q_map: np.ndarray, iters: int = 3) -> np.ndarray:
+    def solve(self, q_full: np.ndarray, q_map: np.ndarray, iters: int = 8) -> np.ndarray:
         """Joint targets on ``idx`` such that EE(q_map + dq) = EE(q_map) + offset.
 
         ``q_full`` supplies the held joints; ``q_map`` is the two mapped joints'
@@ -85,13 +92,28 @@ class PlanarOffset:
         q = np.asarray(q_full, float).copy()
         q[self.idx] = q_map
         goal = self.ee_rz(q) + self.offset
+        dq = self.dq.copy()
         for _ in range(iters):
-            q[self.idx] = q_map + self.dq
+            q[self.idx] = q_map + dq
             err = goal - self.ee_rz(q)
             if np.linalg.norm(err) < 1e-4:
                 break
             J = self._jac_rz(q)
             if abs(np.linalg.det(J)) < 1e-6:
                 break
-            self.dq += np.linalg.solve(J, err)
+            dq += np.linalg.solve(J, err)
+            if np.any(np.abs(dq) > _DQ_MAX):
+                break
+        q[self.idx] = q_map + dq
+        ok = np.linalg.norm(goal - self.ee_rz(q)) < _TOL
+        # 2026-09-18 00:28 incident: an unreachable 21.7 cm nudge made Newton diverge, the
+        # garbage dq re-posed the YAM by 70 deg and dragged panto to its joint limits.
+        # Never emit a non-converged or oversized dq: back the nudge out to the last
+        # reachable offset and keep the last good dq.
+        if not ok or np.any(np.abs(dq) > _DQ_MAX):
+            self.rejected += 1
+            if self._prev_offset is not None:
+                self.offset = self._prev_offset.copy()
+            return q_map + self.dq
+        self.dq = dq
         return q_map + self.dq

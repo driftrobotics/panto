@@ -48,3 +48,17 @@ def test_zero_offset_is_identity_and_clamp(model):
     for _ in range(200):
         po.step((1.0, 1.0), 0.1)
     assert np.linalg.norm(po.offset) <= 0.30 + 1e-9
+
+
+def test_unreachable_nudge_is_backed_out_not_emitted(model):
+    po = PlanarOffset(model, (1, 2), speed_m_s=1.0)
+    q = np.radians([0.0, 65.0, 65.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    last_good = None
+    for _ in range(40):                              # try to walk 40 cm straight up, 1 cm per tick
+        po.step((0.0, 1.0), 0.01)
+        out = po.solve(q, q[[1, 2]])
+        assert np.all(np.abs(out - q[[1, 2]]) <= np.radians(45.0) + 1e-9)
+        if po.rejected == 0:
+            last_good = out.copy()
+    assert po.rejected > 0                           # it did hit the reach limit
+    assert last_good is not None and np.allclose(po.solve(q, q[[1, 2]]), last_good, atol=1e-6)  # frozen there

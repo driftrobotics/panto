@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
-_KEYS = ("space", "left", "right", "up", "down", "a", "d")
+_KEYS = ("space", "left", "right", "up", "down", "a", "d", "c")
 BROADCAST_HZ = 30.0
 
 
