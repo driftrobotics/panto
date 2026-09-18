@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
-_KEYS = ("space", "left", "right")
+_KEYS = ("space", "left", "right", "up", "down", "a", "d")
 BROADCAST_HZ = 30.0
 
 
@@ -131,14 +131,13 @@ class TeleopWeb:
         with self._lock:
             return any(key in keys for keys in self._keys_by_conn.values())
 
+    def axis(self, neg: str, pos: str) -> float:
+        """-1 / 0 / +1 from a pair of held keys (both -> 0)."""
+        return float(self.held(pos)) - float(self.held(neg))
+
     def jog(self) -> float:
-        left = self.held("left")
-        right = self.held("right")
-        if left and not right:
-            return -1.0
-        if right and not left:
-            return 1.0
-        return 0.0
+        """Base rotate: A = +1, D = -1 (rig convention: +yaw is to the operator's left)."""
+        return self.axis("d", "a")
 
     def stop_reason(self) -> str | None:
         with self._lock:
