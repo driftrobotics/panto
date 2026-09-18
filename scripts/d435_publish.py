@@ -67,8 +67,27 @@ def main() -> None:
 
     out = sys.stdout.buffer
     try:
+        # The first frames after a start sometimes never arrive (seen on the D405,
+        # 2026-09-17: "Frame didn't arrive within 5000" on the first start, fine on
+        # the next). Restart the pipeline a few times before giving up.
+        for attempt in range(5):
+            try:
+                pipeline.wait_for_frames()
+                break
+            except RuntimeError as exc:
+                print(f"no first frame (attempt {attempt + 1}/5): {exc}; restarting pipeline", file=sys.stderr)
+                pipeline.stop()
+                pipeline.start(config)
+        else:
+            raise SystemExit("camera never delivered a frame")
         while True:
-            frames = pipeline.wait_for_frames()
+            try:
+                frames = pipeline.wait_for_frames()
+            except RuntimeError as exc:          # mid-stream stall: restart rather than die
+                print(f"frame timeout: {exc}; restarting pipeline", file=sys.stderr)
+                pipeline.stop()
+                pipeline.start(config)
+                continue
             color = frames.get_color_frame()
             if not color:
                 continue

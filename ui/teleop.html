@@ -39,11 +39,19 @@
   #estop:active { background:#96322c; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; margin:0; font-size:12px; font-variant-numeric:tabular-nums; }
   dt { color:var(--muted); } dd { margin:0; text-align:right; word-break:break-all; }
+  #cams { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  #cams figure { margin:0; }
+  #cams video { width:400px; max-width:45vw; background:#000; border:1px solid var(--border,#333); border-radius:4px; }
+  #cams figcaption { font-size:11px; color:var(--muted); }
 </style>
 </head>
 <body>
 <h1>panto teleop</h1>
 <div id="status" class="dead">connecting…</div>
+<div id="cams">
+  <figure><video id="cam-d405" autoplay muted playsinline></video><figcaption id="cap-d405">d405 (wrist) — connecting…</figcaption></figure>
+  <figure><video id="cam-d435" autoplay muted playsinline></video><figcaption id="cap-d435">d435 — connecting…</figcaption></figure>
+</div>
 
 <div class="panel">
   <div class="hint">Space = grip · A/D = base rotate · ←/→ = EE in/out · ↑/↓ = EE z · Esc = E-STOP</div>
@@ -164,6 +172,35 @@ function connect() {
   };
 }
 connect();
+
+// --- cameras: mediamtx WebRTC (WHEP) on port 8889, same host as this page ---
+async function whep(name) {
+  const video = document.getElementById('cam-' + name), cap = document.getElementById('cap-' + name);
+  const url = `${location.protocol}//${location.hostname}:8889/${name}/whep`;
+  let delay = 1000;
+  for (;;) {
+    let pc;
+    try {
+      pc = new RTCPeerConnection();
+      pc.addTransceiver('video', { direction: 'recvonly' });
+      pc.ontrack = (ev) => { video.srcObject = ev.streams[0]; cap.textContent = name + (name === 'd405' ? ' (wrist)' : ''); };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 500); });
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+      if (!res.ok) throw new Error('whep ' + res.status);
+      await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+      delay = 1000;
+      await new Promise((r) => { pc.onconnectionstatechange = () => ['failed', 'disconnected', 'closed'].includes(pc.connectionState) && r(); });
+    } catch (e) {
+      cap.textContent = name + ' — ' + (e.message || e) + ' (retrying)';
+    }
+    try { pc && pc.close(); } catch (_) {}
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 2, 8000);
+  }
+}
+whep('d405'); whep('d435');
 </script>
 </body>
 </html>
