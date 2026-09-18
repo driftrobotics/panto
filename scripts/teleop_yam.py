@@ -139,6 +139,8 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--yam-tau-max", type=_pair, default=np.array([12.0, 12.0]),
                    help="joint2,joint3 max PD torque, N.m (kp = tau-max / lead-max, capped at --yam-kp)")
     p.add_argument("--current", type=float, default=0.8, help="panto per-axis current cap, A (= panto's max)")
+    p.add_argument("--hold-ff-frac", type=float, default=0.5,
+                   help="clamp panto's harness-spring feedforward to this fraction of the current cap")
     p.add_argument("--vel-gain", type=_pair, default=None, help="override panto vel_gain 'v' or 'v0,v1'")
     # reflection
     p.add_argument("--alpha", type=_pair, default=np.array([0.01, 0.01]),
@@ -781,7 +783,12 @@ def _teleop(args: argparse.Namespace, stop: _StopFlag) -> None:
             tau_reflect = M.reflector.step(tau_ext, dt) if args.reflect else np.zeros(2)
             tau_ff = []
             for i, motor in enumerate(config.motors):
-                ff = float(tau_reflect[i]) + PositionBackend._hold_ff(motor, q_p) + _limit_wall(motor, float(q_p[i]))
+                # hold_ff is a linear fit of the harness spring around the workspace centre; it
+                # extrapolates to 100+ mN.m at shoulder < 30 deg (00:32 run), eating the whole
+                # current cap so the coupling spring had nothing left. Keep it under half the cap.
+                hold_cap = args.hold_ff_frac * args.current * float(motor.torque_constant)
+                hold = float(np.clip(PositionBackend._hold_ff(motor, q_p), -hold_cap, hold_cap))
+                ff = float(tau_reflect[i]) + hold + _limit_wall(motor, float(q_p[i]))
                 link.set_input_pos(motor.node_id, float(q_p_target[i]), torque_ff_nm=ff)
                 link.set_pos_gain(motor.node_id, M.pos_gains[i])
                 link.set_limits(motor.node_id, vel_limit, args.current)
