@@ -254,13 +254,14 @@ function round3sf(x) {
 function fmt(v) {
   if (typeof v === 'number') return String(round3sf(v));
   if (Array.isArray(v)) return v.map(x => (typeof x === 'number' ? round3sf(x) : x)).join(', ');
+  if (v && typeof v === 'object') return JSON.stringify(v);
   return String(v);
 }
 function renderState(msg) {
   const dl = document.getElementById('state');
   dl.innerHTML = '';
   for (const [k, v] of Object.entries(msg)) {
-    if (k === 'type') continue;
+    if (k === 'type' || k === 'map') continue;   // map is rendered by the Mapping panel
     const dt = document.createElement('dt'); dt.textContent = k;
     const dd = document.createElement('dd'); dd.textContent = fmt(v);
     dl.appendChild(dt); dl.appendChild(dd);
