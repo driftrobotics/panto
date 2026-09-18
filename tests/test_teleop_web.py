@@ -162,6 +162,49 @@ def test_teleop_route_serves_html(server):
     asyncio.run(run())
 
 
+def test_valid_map_request_is_taken_once(server):
+    async def run():
+        session, ws = await _connect(server)
+        try:
+            assert server.take_map() is None
+            await ws.send_json({"type": "map", "joints": [1, 2], "scale": [-1.0, 2.5]})
+            await asyncio.sleep(0.05)
+            m = server.take_map()
+            assert m == {"joints": [1, 2], "scale": [-1.0, 2.5]}
+            assert server.take_map() is None
+        finally:
+            await _close(session, ws)
+
+    asyncio.run(run())
+
+
+def test_invalid_map_request_is_dropped_and_errors(server):
+    async def run():
+        session, ws = await _connect(server)
+        try:
+            # same joint twice
+            await ws.send_json({"type": "map", "joints": [1, 1], "scale": [1.0, 1.0]})
+            err = await asyncio.wait_for(ws.receive_json(), timeout=1.0)
+            assert err["type"] == "error"
+            assert server.take_map() is None
+
+            # joint out of range
+            await ws.send_json({"type": "map", "joints": [0, 7], "scale": [1.0, 1.0]})
+            err = await asyncio.wait_for(ws.receive_json(), timeout=1.0)
+            assert err["type"] == "error"
+            assert server.take_map() is None
+
+            # zero scale
+            await ws.send_json({"type": "map", "joints": [0, 1], "scale": [0.0, 1.0]})
+            err = await asyncio.wait_for(ws.receive_json(), timeout=1.0)
+            assert err["type"] == "error"
+            assert server.take_map() is None
+        finally:
+            await _close(session, ws)
+
+    asyncio.run(run())
+
+
 def test_jog_is_a_d_and_arrows_are_axes(server):
     async def run():
         session, ws = await _connect(server)

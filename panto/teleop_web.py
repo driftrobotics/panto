@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 from pathlib import Path
 
@@ -46,6 +47,7 @@ class TeleopWeb:
         self._keys_by_conn: dict[int, set[str]] = {}
         self._stop_reason: str | None = None
         self._state: dict = {}
+        self._pending_map: dict | None = None
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -147,6 +149,12 @@ class TeleopWeb:
         with self._lock:
             self._state = dict(state)
 
+    def take_map(self) -> dict | None:
+        with self._lock:
+            m = self._pending_map
+            self._pending_map = None
+            return m
+
     # ------------------------------------------------------------------ http/ws
 
     async def _teleop_page(self, _request: web.Request) -> web.FileResponse:
@@ -164,9 +172,12 @@ class TeleopWeb:
             async for msg in ws:
                 if msg.type is WSMsgType.TEXT:
                     try:
-                        self._dispatch(conn_id, json.loads(msg.data))
+                        error = self._dispatch(conn_id, json.loads(msg.data))
                     except Exception:
                         log.exception("bad client message: %s", msg.data)
+                    else:
+                        if error is not None:
+                            await ws.send_json({"type": "error", "message": error})
                 elif msg.type is WSMsgType.ERROR:
                     break
         finally:
@@ -175,13 +186,14 @@ class TeleopWeb:
                 self._keys_by_conn.pop(conn_id, None)
         return ws
 
-    def _dispatch(self, conn_id: int, msg: dict) -> None:
+    def _dispatch(self, conn_id: int, msg: dict) -> str | None:
+        """Handle one client message. Returns an error string to send back, or None."""
         kind = msg.get("type")
         if kind == "key":
             key = msg.get("key")
             down = bool(msg.get("down"))
             if key not in _KEYS:
-                return
+                return None
             with self._lock:
                 keys = self._keys_by_conn.setdefault(conn_id, set())
                 if down:
@@ -194,8 +206,46 @@ class TeleopWeb:
         elif kind == "estop":
             with self._lock:
                 self._stop_reason = "web:estop"
+        elif kind == "map":
+            error = self._validate_map(msg)
+            if error is not None:
+                return error
+            with self._lock:
+                self._pending_map = {
+                    "joints": [int(msg["joints"][0]), int(msg["joints"][1])],
+                    "scale": [float(msg["scale"][0]), float(msg["scale"][1])],
+                }
         else:
             log.debug("ignoring message kind=%r", kind)
+        return None
+
+    @staticmethod
+    def _validate_map(msg: dict) -> str | None:
+        joints = msg.get("joints")
+        scale = msg.get("scale")
+        if not isinstance(joints, list) or len(joints) != 2:
+            return "map: 'joints' must be a list of two ints"
+        if not isinstance(scale, list) or len(scale) != 2:
+            return "map: 'scale' must be a list of two floats"
+        try:
+            i0, i1 = int(joints[0]), int(joints[1])
+        except (TypeError, ValueError):
+            return "map: joints must be ints"
+        if isinstance(joints[0], bool) or isinstance(joints[1], bool):
+            return "map: joints must be ints"
+        if i0 == i1:
+            return "map: joints must be distinct"
+        if not (0 <= i0 <= 6 and 0 <= i1 <= 6):
+            return "map: joints must be in 0..6"
+        try:
+            s0, s1 = float(scale[0]), float(scale[1])
+        except (TypeError, ValueError):
+            return "map: scale must be floats"
+        if not (math.isfinite(s0) and math.isfinite(s1)):
+            return "map: scale must be finite"
+        if s0 == 0.0 or s1 == 0.0:
+            return "map: scale must be non-zero"
+        return None
 
     # ------------------------------------------------------------------ broadcast
 
