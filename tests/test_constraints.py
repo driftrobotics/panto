@@ -318,3 +318,22 @@ def test_snap_radius_gates_bilateral_constraints():
     assert not is_active(grid.project(np.array([0.01, 0.01])))  # dead centre of a cell
     assert is_active(grid.project(np.array([0.021, 0.0])))
     assert is_active(Point(at=np.array([0.1, 0.0])).project(np.array([0.3, 0.3])))  # no radius
+
+
+def test_combine_springs_is_exact_superposition():
+    from panto.constraints import combine_springs
+
+    springs = [(np.array([0.0, 0.0]), 100.0), (np.array([0.02, -0.01]), 400.0)]
+    K_total, anchor = combine_springs(springs)
+    assert np.allclose(K_total, 500.0 * np.eye(2))
+    for pose in (np.zeros(2), np.array([0.1, 0.05]), np.array([-0.03, 0.2])):
+        summed = sum(k * (a - pose) for a, k in springs)
+        assert np.allclose(K_total @ (anchor - pose), summed)
+
+
+def test_combine_springs_empty_is_inactive():
+    from panto.constraints import combine_springs
+
+    K_total, anchor = combine_springs([])
+    assert anchor is None
+    assert np.allclose(K_total, 0.0)

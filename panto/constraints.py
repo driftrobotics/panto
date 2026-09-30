@@ -77,6 +77,26 @@ def is_active(projection: Projection) -> bool:
     return within_snap(projection.penetration, projection.snap_m)
 
 
+def combine_springs(springs) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Collapse isotropic springs ``(anchor_i, k_i)`` into one equivalent spring.
+
+    Returns ``(K_total, anchor)`` with ``K_total = Σ k_i·I`` and ``anchor`` the
+    k-weighted mean of the ``anchor_i``. Exact, not an approximation — forces
+    superpose: ``Σ k_i·(anchor_i - pose) == K_total·(anchor - pose)`` for any
+    pose. So a stiff wall dominates a soft snap, and a backend that takes a
+    single target (PositionBackend: one IK setpoint) renders the whole set.
+    No springs -> ``(zeros, None)``. Callers choose which springs are active.
+    """
+    k_total = 0.0
+    weighted = np.zeros(2)
+    for anchor_i, k_i in springs:
+        k_total += float(k_i)
+        weighted += float(k_i) * np.asarray(anchor_i, float)
+    if k_total <= 0.0:
+        return np.zeros((2, 2)), None
+    return np.eye(2) * k_total, weighted / k_total
+
+
 @dataclass(frozen=True)
 class Point:
     """Bilateral: hold the EE at a fixed point. Milestone 2 / bring-up."""

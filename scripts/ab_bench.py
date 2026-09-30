@@ -349,11 +349,12 @@ def run_one_backend(name: str, args, target_xy: np.ndarray,
                 raise Aborted(f"wall task excursion {exc_mm:.1f}mm exceeds cap")
             push_proj = Point(at=push_target).project(pose)
             wall_proj = wall.project(pose)
-            K, pull, active = combine_constraints(
+            K_total, anchor = combine_constraints(
                 ((push_proj, resolved["stiffness"]), (wall_proj, wall_stiffness))
             )
-            anchor = np.linalg.solve(K, pull) if active else pose.copy()
-            cmd = ImpedanceCommand(pose=pose, q=q, qd=qd, anchor=anchor, stiffness=K,
+            if anchor is None:
+                anchor = pose.copy()
+            cmd = ImpedanceCommand(pose=pose, q=q, qd=qd, anchor=anchor, stiffness=K_total,
                                     force_limit=FORCE_LIMIT_N)
             try:
                 backend.apply(cmd)

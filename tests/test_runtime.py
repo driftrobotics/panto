@@ -825,8 +825,8 @@ def test_elbow_auto_follows_the_measured_branch_with_hysteresis():
 def _wall_pull(rt, wall, prev, pose):
     """Run the combine step for one wall with an explicit previous pose."""
     rt._prev_pose = None if prev is None else np.asarray(prev, float)
-    K, pull, active = rt._combine([wall], np.asarray(pose, float))
-    return active
+    _, anchor = rt._combine([wall], np.asarray(pose, float))
+    return anchor is not None
 
 
 def test_wall_engages_only_when_crossed_from_the_free_side():

@@ -101,29 +101,14 @@ def pull_away_time_s(t, penetration_mm, release_t: float,
     return float(t[idx[0]] - release_t)
 
 
-def combine_constraints(terms) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Sum active constraint terms into one ``(K, pull, active)``, mirroring
-    ``Runtime._combine``'s "uniform form" policy (sum bilateral pulls, gate
-    unilateral ones on ``is_active``) without needing a live ``Runtime``.
-
-    ``terms`` is a sequence of ``(Projection, k_i)`` pairs. Returns the
-    summed isotropic stiffness ``K = sum(k_i * I)`` (over active terms only),
-    ``pull = sum(k_i * anchor_i)``, and whether any term was active. The
-    caller solves ``anchor = inv(K) @ pull`` when active.
+def combine_constraints(terms) -> tuple[np.ndarray, np.ndarray | None]:
+    """``(Projection, k_i)`` pairs -> ``(K_total, anchor)``, gating unilateral
+    terms on ``is_active`` like ``Runtime._combine`` does, without needing a
+    live ``Runtime``. ``anchor`` is None when no term is active.
     """
-    from .constraints import is_active  # local import: keep this module numpy-only otherwise
+    from .constraints import combine_springs, is_active  # local import: keep this module numpy-only otherwise
 
-    K = np.zeros((2, 2))
-    pull = np.zeros(2)
-    active = False
-    for proj, k_i in terms:
-        if not is_active(proj):
-            continue
-        K_i = np.eye(2) * float(k_i)
-        K = K + K_i
-        pull = pull + K_i @ np.asarray(proj.anchor, float)
-        active = True
-    return K, pull, active
+    return combine_springs((proj.anchor, k_i) for proj, k_i in terms if is_active(proj))
 
 
 @dataclass

@@ -101,9 +101,8 @@ def test_pull_away_time_s_ignores_samples_before_release():
 def test_combine_constraints_weighted_mean_of_bilateral_anchors():
     p1 = Projection(anchor=np.array([0.0, 0.0]), normal=np.zeros(2), penetration=0.0, unilateral=False)
     p2 = Projection(anchor=np.array([10.0, 0.0]), normal=np.zeros(2), penetration=0.0, unilateral=False)
-    K, pull, active = combine_constraints([(p1, 1.0), (p2, 3.0)])
-    assert active
-    anchor = np.linalg.solve(K, pull)
+    K_total, anchor = combine_constraints([(p1, 1.0), (p2, 3.0)])
+    assert np.allclose(K_total, 4.0 * np.eye(2))
     # k-weighted mean: (1*0 + 3*10) / 4 = 7.5
     assert anchor[0] == pytest.approx(7.5)
     assert anchor[1] == pytest.approx(0.0)
@@ -112,18 +111,16 @@ def test_combine_constraints_weighted_mean_of_bilateral_anchors():
 def test_combine_constraints_gates_inactive_unilateral():
     free_side = Projection(anchor=np.array([0.0, 0.0]), normal=np.array([0.0, 1.0]),
                             penetration=-1.0, unilateral=True)
-    K, pull, active = combine_constraints([(free_side, 5.0)])
-    assert not active
-    assert np.allclose(K, 0.0)
-    assert np.allclose(pull, 0.0)
+    K_total, anchor = combine_constraints([(free_side, 5.0)])
+    assert anchor is None
+    assert np.allclose(K_total, 0.0)
 
 
 def test_combine_constraints_includes_active_unilateral():
     blocked = Projection(anchor=np.array([1.0, 2.0]), normal=np.array([0.0, 1.0]),
                           penetration=0.5, unilateral=True)
-    K, pull, active = combine_constraints([(blocked, 2.0)])
-    assert active
-    assert np.linalg.solve(K, pull) == pytest.approx([1.0, 2.0])
+    K_total, anchor = combine_constraints([(blocked, 2.0)])
+    assert anchor == pytest.approx([1.0, 2.0])
 
 
 def test_analyze_line_fields():

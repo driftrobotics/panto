@@ -698,19 +698,16 @@ class Runtime:
             solve_set = list(constraints)
             if self._workspace is not None:
                 solve_set.append(self._workspace)
-            K, pull, active = self._combine(solve_set, pose_c)
-            if not active:
+            K_total, combined = self._combine(solve_set, pose_c)
+            if combined is None:
                 self._backend.relax()
             else:
-                # K is a sum of isotropic k_i·I, always invertible; the effective
-                # anchor is the stiffness-weighted mean of the per-constraint
-                # targets, and K·(anchor-pose) == Σ K_i·(anchor_i-pose) == ΣF_i.
-                anchor = np.linalg.solve(K, pull)
+                anchor = combined
                 force_limit = self._force_limit(sigma, cutback)
                 try:
                     self._backend.apply(ImpedanceCommand(
                         pose=pose_c, q=q, anchor=anchor,
-                        stiffness=K, force_limit=force_limit,
+                        stiffness=K_total, force_limit=force_limit,
                     ))
                 except Unreachable:
                     self._backend.relax()
@@ -749,20 +746,19 @@ class Runtime:
     # ------------------------------------------------------------------ solve
 
     def _combine(self, constraints: Sequence, pose: np.ndarray):
-        """Multi-constraint combination policy (per coordinator, uniform form).
+        """Which constraints act this tick, and how stiff each is -> one spring.
 
-        Every active constraint contributes an isotropic stiffness ``K_i = k_i·I``
-        and its target ``anchor_i``; the restoring direction is carried entirely
-        by ``anchor_i - pose`` (Wall returns ``anchor == pose`` on the free side,
-        so we never touch ``normal``). Bilateral terms always contribute;
-        unilateral terms only when ``is_active`` (``penetration > 0``). We sum
-        ``K = ΣK_i`` and ``pull = ΣK_i·anchor_i``; the backend gets a single
-        ImpedanceCommand whose anchor ``K⁻¹·pull`` is the stiffness-weighted mean
-        — a stiff wall dominates a soft snap.
+        Returns ``(K_total, anchor)`` from ``constraints.combine_springs``:
+        ``anchor`` is None when nothing is active (-> relax). Each active
+        constraint is an isotropic spring ``k_i·I`` toward its ``anchor_i``; the
+        restoring direction lives entirely in ``anchor_i - pose`` (Wall returns
+        ``anchor == pose`` on the free side, so ``normal`` is never needed).
+        Bilateral terms act when in snap range, unilateral ones when penetrated
+        (walls also only once crossed from the free side -- ``_wall_engaged``).
+        Usually a single spring acts; the sum is kept general so fields that
+        overlay (magnets, gravity wells) combine exactly.
         """
-        K = np.zeros((2, 2))
-        pull = np.zeros(2)
-        active = False
+        springs = []
         # Only one point ever acts (averaging several into a centroid is not what
         # anyone means): with snap radii, the nearest point within its radius;
         # otherwise ("hold here") the most recently added one.
@@ -782,11 +778,8 @@ class Runtime:
                 if bool(getattr(proj, "unilateral", False))
                 else self._cfg.control.stiffness_n_per_m
             )
-            K_i = np.eye(2) * k_i
-            K += K_i
-            pull += K_i @ np.asarray(proj.anchor, dtype=float)
-            active = True
-        return K, pull, active
+            springs.append((proj.anchor, k_i))
+        return _c.combine_springs(springs)
 
     @staticmethod
     def _pick_point(constraints: Sequence, pose: np.ndarray):
